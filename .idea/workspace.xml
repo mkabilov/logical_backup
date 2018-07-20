@@ -1,0 +1,912 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ChangeListManager">
+    <list default="true" id="6ccadb99-4202-44e7-9395-6e8c551f686e" name="Default" comment="wip">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/cmd/backup/config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/cmd/backup/config.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pkg/logicalrestore/logicalrestore.go" beforeDir="false" afterPath="$PROJECT_DIR$/pkg/logicalrestore/logicalrestore.go" afterDir="false" />
+    </list>
+    <list id="949471f1-70b6-419a-83fd-887d5ad52074" name="dev" comment="" />
+    <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FUSProjectUsageTrigger">
+    <session id="-1482436319">
+      <usages-collector id="statistics.lifecycle.project">
+        <counts>
+          <entry key="project.closed" value="12" />
+          <entry key="project.open.time.0" value="2" />
+          <entry key="project.open.time.1" value="4" />
+          <entry key="project.open.time.10" value="1" />
+          <entry key="project.open.time.11" value="1" />
+          <entry key="project.open.time.12" value="1" />
+          <entry key="project.open.time.13" value="1" />
+          <entry key="project.open.time.16" value="1" />
+          <entry key="project.open.time.9" value="2" />
+          <entry key="project.opened" value="13" />
+        </counts>
+      </usages-collector>
+      <usages-collector id="statistics.file.extensions.edit">
+        <counts>
+          <entry key="go" value="47762" />
+          <entry key="md" value="87" />
+          <entry key="toml" value="43" />
+          <entry key="txt" value="482" />
+          <entry key="yaml" value="376" />
+        </counts>
+      </usages-collector>
+      <usages-collector id="statistics.file.types.edit">
+        <counts>
+          <entry key="Go" value="47387" />
+          <entry key="Markdown" value="87" />
+          <entry key="PLAIN_TEXT" value="482" />
+          <entry key="Scratch" value="375" />
+          <entry key="TOML file" value="43" />
+          <entry key="YAML" value="376" />
+        </counts>
+      </usages-collector>
+      <usages-collector id="statistics.file.extensions.open">
+        <counts>
+          <entry key="erb" value="2" />
+          <entry key="go" value="228" />
+          <entry key="lock" value="2" />
+          <entry key="md" value="1" />
+          <entry key="s" value="1" />
+          <entry key="sh" value="1" />
+          <entry key="toml" value="6" />
+          <entry key="yaml" value="9" />
+        </counts>
+      </usages-collector>
+      <usages-collector id="statistics.file.types.open">
+        <counts>
+          <entry key="Go" value="218" />
+          <entry key="Markdown" value="1" />
+          <entry key="PLAIN_TEXT" value="3" />
+          <entry key="Scratch" value="10" />
+          <entry key="TOML file" value="8" />
+          <entry key="YAML" value="9" />
+          <entry key="x86 Plan9 Assembly" value="1" />
+        </counts>
+      </usages-collector>
+    </session>
+  </component>
+  <component name="FavoritesManager">
+    <favorites_list name="logical_backup" />
+  </component>
+  <component name="FileEditorManager">
+    <leaf SIDE_TABS_SIZE_LIMIT_KEY="300">
+      <file pinned="false" current-in-tab="true">
+        <entry file="file://$PROJECT_DIR$/cmd/backup/main.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="375">
+              <caret line="25" column="5" lean-forward="true" selection-start-line="25" selection-start-column="5" selection-end-line="25" selection-end-column="5" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/logicalbackup/logicalbackup.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="402">
+              <caret line="618" column="9" lean-forward="true" selection-start-line="618" selection-start-column="9" selection-end-line="618" selection-end-column="9" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/replication.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="6570">
+              <caret line="438" column="23" selection-start-line="438" selection-start-column="23" selection-end-line="438" selection-end-column="23" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/logicalrestore/logicalrestore.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="503">
+              <caret line="62" lean-forward="true" selection-start-line="62" selection-end-line="62" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/message/message.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="528">
+              <caret line="103" column="5" selection-start-line="103" selection-start-column="5" selection-end-line="103" selection-end-column="5" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/dbutils/dbutils.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="690">
+              <caret line="46" column="13" selection-start-line="46" selection-start-column="13" selection-end-line="46" selection-end-column="13" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/tablebackup/tablebackup.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="423">
+              <caret line="317" column="5" selection-start-line="317" selection-start-column="5" selection-end-line="317" selection-end-column="5" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/decoder/decoder.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="555">
+              <caret line="37" column="1" selection-start-line="37" selection-start-column="1" selection-end-line="37" selection-end-column="1" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/os/file.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="3195">
+              <caret line="213" column="5" selection-start-line="213" selection-start-column="5" selection-end-line="213" selection-end-column="5" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/pkg/tablebackup/basebackup.go">
+          <provider selected="true" editor-type-id="text-editor">
+            <state relative-caret-position="2715">
+              <caret line="181" lean-forward="true" selection-start-line="181" selection-end-line="181" />
+            </state>
+          </provider>
+        </entry>
+      </file>
+    </leaf>
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Go File" />
+      </list>
+    </option>
+  </component>
+  <component name="FindInProjectRecents">
+    <findStrings>
+      <find>periodicba</find>
+      <find>Identifier</find>
+      <find>info.yaml</find>
+      <find>sending new</find>
+      <find>starting from</find>
+      <find>delta me</find>
+      <find>SaveDelt</find>
+      <find>prior</find>
+      <find>is prio</find>
+      <find>queueing</find>
+      <find>already lock</find>
+      <find>st</find>
+      <find>restart_lsn</find>
+      <find>delta files</find>
+      <find>removing unnecessary delta file</find>
+      <find>delta cnt</find>
+      <find>run(</find>
+      <find>Basebackup</find>
+      <find>archive</find>
+      <find>backupThreshold</find>
+      <find>no tables</find>
+      <find>replication</find>
+      <find>logical replic</find>
+      <find>application</find>
+      <find>setting replica</find>
+      <find>create_replication</find>
+      <find>publication</find>
+      <find>pg_class</find>
+      <find>replid</find>
+      <find>set replica</find>
+    </findStrings>
+    <replaceStrings>
+      <replace>b.</replace>
+      <replace>*Basebackup</replace>
+      <replace>message.Relation</replace>
+      <replace>*LogicalBackup</replace>
+      <replace>.conncfg</replace>
+      <replace>.connCfg</replace>
+      <replace>*TableBackup</replace>
+    </replaceStrings>
+    <dirStrings>
+      <dir>$PROJECT_DIR$/vendor/github.com/jackc/pgx</dir>
+      <dir>$PROJECT_DIR$/../../jackc/pgx</dir>
+    </dirStrings>
+  </component>
+  <component name="GOROOT" path="/usr/local/Cellar/go/1.10.3/libexec" />
+  <component name="Git.Settings">
+    <option name="UPDATE_TYPE" value="REBASE" />
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GoDepProject">
+    <integration-enabled>true</integration-enabled>
+  </component>
+  <component name="IdeDocumentHistory">
+    <option name="CHANGED_PATHS">
+      <list>
+        <option value="$PROJECT_DIR$/pkg/decoder/replicate.go" />
+        <option value="$PROJECT_DIR$/pkg/utils/utils.go" />
+        <option value="$PROJECT_DIR$/../../jackc/pgx/query.go" />
+        <option value="$PROJECT_DIR$/pkg/csv/csv.go" />
+        <option value="$PROJECT_DIR$/pkg/csv/pcsv.go" />
+        <option value="$PROJECT_DIR$/vendor/github.com/jackc/pgx/query.go" />
+        <option value="$PROJECT_DIR$/pkg/basedump/basedump.go" />
+        <option value="$PROJECT_DIR$/pkg/replicate/replicate.go" />
+        <option value="$PROJECT_DIR$/pkg/backup/misc.go" />
+        <option value="$PROJECT_DIR$/pkg/backup/backup.go" />
+        <option value="$PROJECT_DIR$/vendor/github.com/jackc/pgx/conn.go" />
+        <option value="$PROJECT_DIR$/pkg/logicalbackup/misc.go" />
+        <option value="$PROJECT_DIR$/pkg/decoder/messages.go" />
+        <option value="$PROJECT_DIR$/pkg/basebackup/baserestore.go" />
+        <option value="$PROJECT_DIR$/cmd/main.go" />
+        <option value="$PROJECT_DIR$/pkg/pcsv/pcsv.go" />
+        <option value="$PROJECT_DIR$/pkg/ptext/pcsv.go" />
+        <option value="$PROJECT_DIR$/pkg/ptext/ptext.go" />
+        <option value="$PROJECT_DIR$/pkg/copyfrom/copyfrom.go" />
+        <option value="$PROJECT_DIR$/pkg/decoder/decoder.go" />
+        <option value="$PROJECT_DIR$/vendor/github.com/jackc/pgx/replication.go" />
+        <option value="$PROJECT_DIR$/pkg/basebackup/basebackup.go" />
+        <option value="$PROJECT_DIR$/pkg/logicalbackup/basebackup.go" />
+        <option value="$APPLICATION_CONFIG_DIR$/scratches/scratch.go" />
+        <option value="$PROJECT_DIR$/pkg/queue/queue.go" />
+        <option value="$PROJECT_DIR$/vendor/github.com/jackc/pgx/copy_from.go" />
+        <option value="$PROJECT_DIR$/vendor/github.com/jackc/pgx/copy_to.go" />
+        <option value="$PROJECT_DIR$/pkg/tablebackup/relinfo.go" />
+        <option value="$PROJECT_DIR$/cmd/restore/main.go" />
+        <option value="$PROJECT_DIR$/Gopkg.toml" />
+        <option value="$PROJECT_DIR$/README.md" />
+        <option value="$PROJECT_DIR$/cmd/backup/main.go" />
+        <option value="$PROJECT_DIR$/pkg/logicalbackup/decode.go" />
+        <option value="$PROJECT_DIR$/pkg/message/message.go" />
+        <option value="$PROJECT_DIR$/pkg/logicalbackup/backup.go" />
+        <option value="$PROJECT_DIR$/pkg/tablebackup/basebackup.go" />
+        <option value="$PROJECT_DIR$/pkg/config/config.go" />
+        <option value="$PROJECT_DIR$/pkg/dbutils/dbutils.go" />
+        <option value="$PROJECT_DIR$/cmd/backup/config.yaml" />
+        <option value="$PROJECT_DIR$/pkg/tablebackup/tablebackup.go" />
+        <option value="$PROJECT_DIR$/pkg/logicalbackup/logicalbackup.go" />
+        <option value="$PROJECT_DIR$/pkg/logicalrestore/logicalrestore.go" />
+      </list>
+    </option>
+  </component>
+  <component name="JsBuildToolGruntFileManager" detection-done="true" sorting="DEFINITION_ORDER" />
+  <component name="JsBuildToolPackageJson" detection-done="true" sorting="DEFINITION_ORDER" />
+  <component name="JsGulpfileManager">
+    <detection-done>true</detection-done>
+    <sorting>DEFINITION_ORDER</sorting>
+  </component>
+  <component name="ProjectFrameBounds" extendedState="6">
+    <option name="y" value="23" />
+    <option name="width" value="1440" />
+    <option name="height" value="838" />
+  </component>
+  <component name="ProjectInspectionProfilesVisibleTreeState">
+    <entry key="Project Default">
+      <profile-state>
+        <expanded-state>
+          <State />
+          <State>
+            <id>Bitwise operation issuesJavaScript</id>
+          </State>
+          <State>
+            <id>Control flow issuesJavaScript</id>
+          </State>
+          <State>
+            <id>JavaScript</id>
+          </State>
+          <State>
+            <id>JavaScript function metricsJavaScript</id>
+          </State>
+          <State>
+            <id>Potentially confusing code constructsJavaScript</id>
+          </State>
+        </expanded-state>
+      </profile-state>
+    </entry>
+  </component>
+  <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
+  <component name="ProjectView">
+    <navigator proportions="" version="1">
+      <foldersAlwaysOnTop value="true" />
+    </navigator>
+    <panes>
+      <pane id="Scope" />
+      <pane id="ProjectPane">
+        <subPane>
+          <expand>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="cmd" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="cmd" type="462c0819:PsiDirectoryNode" />
+              <item name="backup" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="config" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="dbutils" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="decoder" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="logicalbackup" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="logicalrestore" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="message" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="queue" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="logical_backup" type="462c0819:PsiDirectoryNode" />
+              <item name="pkg" type="462c0819:PsiDirectoryNode" />
+              <item name="tablebackup" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="External Libraries" type="cb654da1:ExternalLibrariesNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="Scratches and Consoles" type="1a2a3e82:ScratchProjectViewPane$MyProjectNode" />
+            </path>
+            <path>
+              <item name="logical_backup" type="b2602c69:ProjectViewProjectNode" />
+              <item name="Scratches and Consoles" type="1a2a3e82:ScratchProjectViewPane$MyProjectNode" />
+              <item name="Scratches" type="d62648e6:ScratchProjectViewPane$MyRootNode" />
+            </path>
+          </expand>
+          <select />
+        </subPane>
+      </pane>
+    </panes>
+  </component>
+  <component name="PropertiesComponent">
+    <property name="DefaultGoTemplateProperty" value="Go File" />
+    <property name="GO_FMT" value="false" />
+    <property name="go.gopath.indexing.explicitly.defined" value="true" />
+    <property name="go.sdk.automatically.set" value="true" />
+    <property name="go.vendoring.notification.had.been.shown" value="true" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/vendor/github.com/jackc/pgx" />
+    <property name="nodejs_interpreter_path.stuck_in_default_project" value="undefined stuck path" />
+    <property name="nodejs_npm_path_reset_for_default_project" value="true" />
+    <property name="settings.editor.selected.configurable" value="preferences.pluginManager" />
+  </component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/pkg/tablebackup" />
+      <recent name="$PROJECT_DIR$/pkg/logicalbackup" />
+      <recent name="$PROJECT_DIR$/pkg" />
+      <recent name="$PROJECT_DIR$/cmd/backup" />
+      <recent name="$PROJECT_DIR$/pkg/replicate" />
+    </key>
+  </component>
+  <component name="RunDashboard">
+    <option name="ruleStates">
+      <list>
+        <RuleState>
+          <option name="name" value="ConfigurationTypeDashboardGroupingRule" />
+        </RuleState>
+        <RuleState>
+          <option name="name" value="StatusDashboardGroupingRule" />
+        </RuleState>
+      </list>
+    </option>
+  </component>
+  <component name="RunManager" selected="Go Build.backup">
+    <configuration name="backup" type="GoApplicationRunConfiguration" factoryName="Go Application" temporary="true">
+      <module name="logical_backup" />
+      <working_directory value="$PROJECT_DIR$/" />
+      <go_parameters value="-i" />
+      <parameters value="cmd/backup/config.yaml" />
+      <kind value="FILE" />
+      <filePath value="$PROJECT_DIR$/cmd/backup/main.go" />
+      <directory value="$PROJECT_DIR$/" />
+      <method v="2" />
+    </configuration>
+    <configuration name="go build scratch.go" type="GoApplicationRunConfiguration" factoryName="Go Application" temporary="true" nameIsGenerated="true">
+      <module name="logical_backup" />
+      <working_directory value="$PROJECT_DIR$/" />
+      <go_parameters value="-i" />
+      <kind value="FILE" />
+      <filePath value="$APPLICATION_CONFIG_DIR$/scratches/scratch.go" />
+      <package value="github.com/ikitiki/logical_backup" />
+      <directory value="$PROJECT_DIR$/" />
+      <method v="2" />
+    </configuration>
+    <list>
+      <item itemvalue="Go Build.backup" />
+      <item itemvalue="Go Build.go build scratch.go" />
+    </list>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Go Build.backup" />
+        <item itemvalue="Go Build.go build scratch.go" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="StructureViewFactory">
+    <option name="ACTIVE_ACTIONS" value=",Show Private Members,Show package structure" />
+  </component>
+  <component name="ToolWindowManager">
+    <frame x="605" y="-1417" width="1882" height="1412" extended-state="0" />
+    <editor active="true" />
+    <layout>
+      <window_info active="true" content_ui="combo" id="Project" order="0" sideWeight="0.4486607" visible="true" weight="0.19673914" />
+      <window_info id="Structure" order="1" sideWeight="0.55133927" side_tool="true" weight="0.2553648" />
+      <window_info id="Favorites" order="2" sideWeight="0.44806516" side_tool="true" weight="0.18584521" />
+      <window_info anchor="bottom" id="Message" order="0" />
+      <window_info anchor="bottom" id="Find" order="1" sideWeight="0.49971476" weight="0.6219839" />
+      <window_info anchor="bottom" id="Run" order="2" sideWeight="0.49971476" weight="0.11590909" />
+      <window_info anchor="bottom" id="Debug" order="3" weight="0.35380507" />
+      <window_info anchor="bottom" id="Cvs" order="4" weight="0.25" />
+      <window_info anchor="bottom" id="Inspection" order="5" weight="0.4" />
+      <window_info anchor="bottom" id="TODO" order="6" />
+      <window_info anchor="bottom" id="Docker" order="7" show_stripe_button="false" />
+      <window_info anchor="bottom" id="Database Changes" order="8" show_stripe_button="false" />
+      <window_info anchor="bottom" id="Terminal" order="9" weight="0.32977304" />
+      <window_info anchor="bottom" id="Version Control" order="10" weight="0.32860717" />
+      <window_info anchor="bottom" id="Event Log" order="11" sideWeight="0.5002852" side_tool="true" weight="0.2898113" />
+      <window_info anchor="bottom" id="Messages" order="12" />
+      <window_info anchor="right" id="Commander" internal_type="SLIDING" order="0" type="SLIDING" weight="0.4" />
+      <window_info anchor="right" id="Ant Build" order="1" weight="0.25" />
+      <window_info anchor="right" content_ui="combo" id="Hierarchy" order="2" weight="0.25" />
+      <window_info anchor="right" id="Database" order="3" />
+    </layout>
+    <layout-to-restore>
+      <window_info active="true" content_ui="combo" id="Project" order="0" sideWeight="0.5518591" visible="true" weight="0.18584521" />
+      <window_info id="Structure" order="1" sideWeight="0.4481409" side_tool="true" visible="true" weight="0.18584521" />
+      <window_info id="Favorites" order="2" sideWeight="0.44806516" side_tool="true" weight="0.18584521" />
+      <window_info anchor="bottom" id="Message" order="0" />
+      <window_info anchor="bottom" id="Find" order="1" weight="0.40186915" />
+      <window_info anchor="bottom" id="Run" order="2" visible="true" weight="0.22867924" />
+      <window_info anchor="bottom" id="Debug" order="3" weight="0.4" />
+      <window_info anchor="bottom" id="Cvs" order="4" weight="0.25" />
+      <window_info anchor="bottom" id="Inspection" order="5" weight="0.4" />
+      <window_info anchor="bottom" id="TODO" order="6" />
+      <window_info anchor="bottom" id="Docker" order="7" show_stripe_button="false" />
+      <window_info anchor="bottom" id="Database Changes" order="8" show_stripe_button="false" />
+      <window_info anchor="bottom" id="Terminal" order="9" />
+      <window_info anchor="bottom" id="Version Control" order="10" weight="0.32954547" />
+      <window_info anchor="bottom" id="Event Log" order="11" side_tool="true" />
+      <window_info anchor="right" id="Commander" internal_type="SLIDING" order="0" type="SLIDING" weight="0.4" />
+      <window_info anchor="right" id="Ant Build" order="1" weight="0.25" />
+      <window_info anchor="right" content_ui="combo" id="Hierarchy" order="2" weight="0.25" />
+      <window_info anchor="right" id="Database" order="3" />
+    </layout-to-restore>
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="1" />
+  </component>
+  <component name="Vcs.Log.History.Properties">
+    <option name="COLUMN_ORDER">
+      <list>
+        <option value="0" />
+        <option value="2" />
+        <option value="3" />
+        <option value="1" />
+      </list>
+    </option>
+  </component>
+  <component name="VcsContentAnnotationSettings">
+    <option name="myLimit" value="2678400000" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <option name="CHECK_CODE_SMELLS_BEFORE_PROJECT_COMMIT" value="false" />
+    <option name="CHECK_NEW_TODO" value="false" />
+    <ignored-roots>
+      <path value="$PROJECT_DIR$/vendor/github.com/jackc/pgx" />
+    </ignored-roots>
+    <MESSAGE value="init" />
+    <MESSAGE value="bug fixung" />
+    <MESSAGE value="multi-delta" />
+    <MESSAGE value="sort in restore" />
+    <MESSAGE value="skip empty changes" />
+    <MESSAGE value="some fixes" />
+    <MESSAGE value="config in a separate package" />
+    <MESSAGE value="go fmt" />
+    <MESSAGE value="some refactoring" />
+    <MESSAGE value="fixes" />
+    <MESSAGE value="some improvements" />
+    <MESSAGE value="lowercase sql commands" />
+    <MESSAGE value="tracking new tables" />
+    <MESSAGE value="more config params" />
+    <MESSAGE value="more log messages" />
+    <MESSAGE value="context added" />
+    <MESSAGE value="application name" />
+    <MESSAGE value="remove tx" />
+    <MESSAGE value="fix error message" />
+    <MESSAGE value="comment" />
+    <MESSAGE value="wip" />
+    <MESSAGE value="remove log message" />
+    <MESSAGE value="add queue basebackup tables" />
+    <option name="LAST_COMMIT_MESSAGE" value="add queue basebackup tables" />
+  </component>
+  <component name="WindowStateProjectService">
+    <state width="204" height="491" key="Git.Branch.Popup" />
+    <state width="204" height="491" key="Git.Branch.Popup/2880.1800/3440.1440" />
+    <state width="204" height="491" key="Git.Branch.Popup@3440.1440" />
+  </component>
+  <component name="debuggerHistoryManager">
+    <expressions id="breakpointCondition">
+      <expression>
+        <expression-string>t.n</expression-string>
+        <language-id>go</language-id>
+        <evaluation-mode>EXPRESSION</evaluation-mode>
+      </expression>
+    </expressions>
+  </component>
+  <component name="editorHistoryManager">
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/log/testingadapter/adapter.go" />
+    <entry file="file://$APPLICATION_CONFIG_DIR$/scratches/scratch_1.go">
+      <provider selected="true" editor-type-id="text-editor" />
+    </entry>
+    <entry file="file://$APPLICATION_CONFIG_DIR$/scratches/scratch_2.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="345">
+          <caret line="23" selection-start-line="23" selection-end-line="23" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/sync/cond.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="477">
+          <caret line="51" column="15" selection-start-line="51" selection-start-column="15" selection-end-line="51" selection-end-column="15" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/sheerun/queue/queue.go" />
+    <entry file="file://$PROJECT_DIR$/../../damnever/goqueue/queue.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="177">
+          <caret line="162" column="16" selection-start-line="162" selection-start-column="16" selection-end-line="162" selection-end-column="16" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/Gopkg.lock">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="420">
+          <caret line="28" column="12" selection-start-line="28" selection-start-column="12" selection-end-line="28" selection-end-column="12" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/container/list/list.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="411">
+          <caret line="61" column="5" selection-start-line="61" selection-start-column="5" selection-end-line="61" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/damnever/goqueue/queue.go" />
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/fmt/scan.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="330">
+          <caret line="112" column="5" selection-start-line="112" selection-start-column="5" selection-end-line="112" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$APPLICATION_CONFIG_DIR$/scratches/scratch.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="240">
+          <caret line="16" column="49" selection-start-line="16" selection-start-column="49" selection-end-line="16" selection-end-column="49" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/chunkreader/chunkreader.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="705">
+          <caret line="85" selection-start-line="85" selection-end-line="85" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/pgproto3/frontend.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="615">
+          <caret line="115" selection-start-line="115" selection-end-line="115" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/runtime/asm_amd64.s">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="255">
+          <caret line="2360" selection-start-line="2360" selection-end-line="2360" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/sync/mutex.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="222">
+          <caret line="71" column="16" selection-start-line="71" selection-start-column="16" selection-end-line="71" selection-end-column="16" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/../../cockroachdb/cockroach/pkg/util/syncutil/mutex_sync.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="312">
+          <caret line="49" column="16" selection-start-line="49" selection-start-column="16" selection-end-line="49" selection-end-column="16" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/../../../go.uber.org/atomic/atomic.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="3345">
+          <caret line="223" column="5" selection-start-line="223" selection-start-column="5" selection-end-line="223" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/sync/atomic/value.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="225">
+          <caret line="15" column="5" selection-start-line="15" selection-start-column="5" selection-end-line="15" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/context/context.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="530">
+          <caret line="169" selection-start-line="169" selection-end-line="169" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/math/rand/rand.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="221">
+          <caret line="323" column="5" lean-forward="true" selection-start-line="323" selection-start-column="5" selection-end-line="323" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/time/time.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="146">
+          <caret line="638" column="21" selection-start-line="638" selection-start-column="21" selection-end-line="638" selection-end-column="21" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/batch.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="240">
+          <caret line="260" column="21" selection-start-line="260" selection-start-column="21" selection-end-line="260" selection-end-column="21" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/../../jackc/pgx/conn.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="233">
+          <caret line="137" column="24" selection-start-line="137" selection-start-column="4" selection-end-line="137" selection-end-column="24" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/copy_from.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="240">
+          <caret line="298" column="9" selection-start-line="298" selection-start-column="9" selection-end-line="298" selection-end-column="9" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/copy_to.go" />
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/builtin/builtin.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="195">
+          <caret line="78" column="5" selection-start-line="78" selection-start-column="5" selection-end-line="78" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/cmd/restore/main.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="465">
+          <caret line="31" selection-start-line="31" selection-end-line="31" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/flag/flag.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="8115">
+          <caret line="541" column="13" selection-start-line="541" selection-start-column="13" selection-end-line="541" selection-end-column="13" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/Gopkg.toml">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="570">
+          <caret line="38" selection-start-line="38" selection-end-line="38" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/README.md">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="75">
+            <caret line="5" column="2" lean-forward="true" selection-start-line="5" selection-start-column="2" selection-end-line="5" selection-end-column="2" />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/os/path.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="139">
+          <caret line="66" column="5" selection-start-line="66" selection-start-column="5" selection-end-line="66" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/logicalbackup/decode.go" />
+    <entry file="file://$PROJECT_DIR$/pkg/logicalbackup/backup.go" />
+    <entry file="file://$PROJECT_DIR$/pkg/queue/queue.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="590">
+          <caret line="140" column="16" selection-start-line="140" selection-start-column="16" selection-end-line="140" selection-end-column="16" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/database/sql/sql.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="287">
+          <caret line="162" column="4" selection-start-line="162" selection-start-column="4" selection-end-line="162" selection-end-column="4" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/query.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="312">
+          <caret line="355" column="21" selection-start-line="355" selection-start-column="21" selection-end-line="355" selection-end-column="21" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/os/signal/signal.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="304">
+          <caret line="104" column="5" selection-start-line="104" selection-start-column="5" selection-end-line="104" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/config/config.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="195">
+          <caret line="13" column="4" selection-start-line="13" selection-start-column="4" selection-end-line="13" selection-end-column="4" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/conn.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="297">
+          <caret line="1380" column="56" selection-start-line="1380" selection-start-column="20" selection-end-line="1380" selection-end-column="56" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/tx.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="292">
+          <caret line="176" column="14" selection-start-line="176" selection-start-column="14" selection-end-line="176" selection-end-column="14" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/cmd/backup/config.yaml">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="210">
+          <caret line="14" column="18" selection-start-line="14" selection-start-column="18" selection-end-line="14" selection-end-column="18" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/vendor/github.com/jackc/pgx/replication.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="6570">
+          <caret line="438" column="23" selection-start-line="438" selection-start-column="23" selection-end-line="438" selection-end-column="23" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/dbutils/dbutils.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="690">
+          <caret line="46" column="13" selection-start-line="46" selection-start-column="13" selection-end-line="46" selection-end-column="13" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/decoder/decoder.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="555">
+          <caret line="37" column="1" selection-start-line="37" selection-start-column="1" selection-end-line="37" selection-end-column="1" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file:///usr/local/Cellar/go/1.10.3/libexec/src/os/file.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="3195">
+          <caret line="213" column="5" selection-start-line="213" selection-start-column="5" selection-end-line="213" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/tablebackup/basebackup.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="2715">
+          <caret line="181" lean-forward="true" selection-start-line="181" selection-end-line="181" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/tablebackup/tablebackup.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="423">
+          <caret line="317" column="5" selection-start-line="317" selection-start-column="5" selection-end-line="317" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/message/message.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="528">
+          <caret line="103" column="5" selection-start-line="103" selection-start-column="5" selection-end-line="103" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/logicalrestore/logicalrestore.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="503">
+          <caret line="62" lean-forward="true" selection-start-line="62" selection-end-line="62" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/pkg/logicalbackup/logicalbackup.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="402">
+          <caret line="618" column="9" lean-forward="true" selection-start-line="618" selection-start-column="9" selection-end-line="618" selection-end-column="9" />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/cmd/backup/main.go">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="375">
+          <caret line="25" column="5" lean-forward="true" selection-start-line="25" selection-start-column="5" selection-end-line="25" selection-end-column="5" />
+        </state>
+      </provider>
+    </entry>
+  </component>
+</project>

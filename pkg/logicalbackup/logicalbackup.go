@@ -462,7 +462,7 @@ func (b *LogicalBackup) Wait() {
 }
 
 func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
-	query := `select n.nspname, c.relname
+	query := `select c.oid, n.nspname, c.relname
      from pg_class c
      inner join pg_namespace n on (n.oid = c.relnamespace)
      inner join pg_get_publication_tables('%s') x on x.relid = c.oid;`

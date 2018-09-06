@@ -660,6 +660,7 @@ func (b *LogicalBackup) Run() {
 	}
 
 	if b.cfg.InitialBasebackup {
+		log.Printf("Queueing tables for the initial backup")
 		b.queueBbTables()
 	}
 }

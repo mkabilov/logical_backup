@@ -31,7 +31,7 @@ func main() {
 		cfg.Slotname, cfg.PublicationName)
 	log.Printf("Backing up new tables: %t", cfg.TrackNewTables)
 
-	lBackup, err := logicalbackup.New(ctx, cfg)
+	lb, err := logicalbackup.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("could not create backup instance: %v", err)
 	}
@@ -39,7 +39,7 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
 
-	lBackup.Run()
+	lb.Run()
 
 loop:
 	for {
@@ -55,5 +55,5 @@ loop:
 	}
 
 	done()
-	lBackup.Wait()
+	lb.Wait()
 }

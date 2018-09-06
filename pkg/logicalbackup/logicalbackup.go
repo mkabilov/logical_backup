@@ -38,12 +38,10 @@ type LogicalBackuper interface {
 
 type LogicalBackup struct {
 	ctx           context.Context
-	baseDir       string
 	stateFilename string
+	cfg           *config.Config
 
-	publicationName string
-	slotName        string
-	pluginArgs      []string
+	pluginArgs []string
 
 	backupTables map[uint32]tablebackup.TableBackuper
 
@@ -54,10 +52,9 @@ type LogicalBackup struct {
 	replMessageWaitTimeout time.Duration
 	statusTimeout          time.Duration
 
-	trackNewTables bool
-	relations      map[message.Identifier]message.Relation
-	relationNames  map[uint32]message.Identifier
-	types          map[uint32]message.Type
+	relations     map[message.Identifier]message.Relation
+	relationNames map[uint32]message.Identifier
+	types         map[uint32]message.Type
 
 	storedRestartLSN uint64
 	startLSN         uint64
@@ -68,10 +65,6 @@ type LogicalBackup struct {
 	bbQueue    *queue.Queue
 	bbInterval time.Duration
 	waitGr     *sync.WaitGroup
-
-	concurrentBasebackups int
-	deltasPerFile         int
-	backupThreshold       int
 }
 
 func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
@@ -85,13 +78,10 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	pgxConn.RuntimeParams = map[string]string{"application_name": applicationName}
 
 	lb := &LogicalBackup{
-		publicationName:        cfg.PublicationName,
-		baseDir:                cfg.Dir,
 		ctx:                    ctx,
 		connCfg:                pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
-		slotName:               cfg.Slotname,
 		relations:              make(map[message.Identifier]message.Relation),
 		relationNames:          make(map[uint32]message.Identifier),
 		types:                  make(map[uint32]message.Type),
@@ -101,10 +91,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		waitGr:                 &sync.WaitGroup{},
 		stateFilename:          path.Join(cfg.Dir, "state.yaml"),
 		bbInterval:             backupsPeriod,
-		trackNewTables:         cfg.TrackNewTables,
-		concurrentBasebackups:  cfg.ConcurrentBasebackups,
-		deltasPerFile:          cfg.DeltasPerFile,
-		backupThreshold:        cfg.BackupThreshold,
+		cfg:                    cfg,
 	}
 
 	conn, err := pgx.Connect(pgxConn)
@@ -132,7 +119,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	}
 
 	if len(lb.backupTables) == 0 {
-		if !lb.trackNewTables {
+		if !lb.cfg.TrackNewTables {
 			log.Fatalf("no tables to backup")
 		}
 	} else {
@@ -151,13 +138,13 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	}
 
 	if !slotExists {
-		log.Printf("Creating logical replication slot %s", lb.slotName)
+		log.Printf("Creating logical replication slot %s", lb.cfg.Slotname)
 
 		startLSN, err := lb.createSlot(conn)
 		if err != nil {
 			return nil, fmt.Errorf("could not create replication slot: %v", err)
 		}
-		log.Printf("Created missing replication slot %q, consistent point %s", lb.slotName, pgx.FormatLSN(startLSN))
+		log.Printf("Created missing replication slot %q, consistent point %s", lb.cfg.Slotname, pgx.FormatLSN(startLSN))
 
 		lb.startLSN = startLSN
 		if err := lb.storeRestartLSN(); err != nil {
@@ -212,9 +199,9 @@ func (b *LogicalBackup) handler(m message.Message) error {
 				})
 			} else { // new table
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
-					if b.trackNewTables {
+					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
-						if tb, tErr := tablebackup.New(b.ctx, b.baseDir, tblName, b.connCfg, time.Minute, b.bbQueue, b.deltasPerFile, b.backupThreshold); tErr != nil {
+						if tb, tErr := tablebackup.New(b.ctx, b.cfg.Dir, tblName, b.connCfg, time.Minute, b.bbQueue, b.cfg.DeltasPerFile, b.cfg.BackupThreshold); tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
 							b.backupTables[v.OID] = tb
@@ -364,7 +351,7 @@ func (b *LogicalBackup) startReplication() error {
 
 	log.Printf("Starting from %s lsn", pgx.FormatLSN(b.startLSN))
 
-	err := b.replConn.StartReplication(b.slotName, b.startLSN, -1, b.pluginArgs...)
+	err := b.replConn.StartReplication(b.cfg.Slotname, b.startLSN, -1, b.pluginArgs...)
 	if err != nil {
 		return fmt.Errorf("failed to start replication: %s", err)
 	}
@@ -410,7 +397,7 @@ func (b *LogicalBackup) startReplication() error {
 func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 	slotExists := false
 
-	rows, err := conn.Query("select confirmed_flush_lsn, slot_type, database from pg_replication_slots where slot_name = $1;", b.slotName)
+	rows, err := conn.Query("select confirmed_flush_lsn, slot_type, database from pg_replication_slots where slot_name = $1;", b.cfg.Slotname)
 	if err != nil {
 		return false, fmt.Errorf("could not execute query: %v", err)
 	}
@@ -425,11 +412,11 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 		}
 
 		if slotType != logicalSlotType {
-			return false, fmt.Errorf("slot %q is not a logical slot", b.slotName)
+			return false, fmt.Errorf("slot %q is not a logical slot", b.cfg.Slotname)
 		}
 
 		if database != b.connCfg.Database {
-			return false, fmt.Errorf("replication slot %q belongs to %q database", b.slotName, database)
+			return false, fmt.Errorf("replication slot %q belongs to %q database", b.cfg.Slotname, database)
 		}
 
 		if lsn, err := pgx.ParseLSN(lsnString); err != nil {
@@ -444,7 +431,7 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 
 func (b *LogicalBackup) createSlot(conn *pgx.Conn) (uint64, error) {
 	var strLSN sql.NullString
-	row := conn.QueryRowEx(b.ctx, "select lsn from pg_create_logical_replication_slot($1, $2)", nil, b.slotName, outputPlugin)
+	row := conn.QueryRowEx(b.ctx, "select lsn from pg_create_logical_replication_slot($1, $2)", nil, b.cfg.Slotname, outputPlugin)
 
 	if err := row.Scan(&strLSN); err != nil {
 		return 0, fmt.Errorf("could not scan: %v", err)
@@ -502,13 +489,13 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 		}
 
 		tb, err := tablebackup.New(b.ctx,
-			b.baseDir,
+			b.cfg.Dir,
 			t,
 			b.connCfg,
 			time.Minute,
 			b.bbQueue,
-			b.deltasPerFile,
-			b.backupThreshold)
+			b.cfg.DeltasPerFile,
+			b.cfg.BackupThreshold)
 
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
@@ -521,7 +508,7 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 }
 
 func (b *LogicalBackup) initPublication(conn *pgx.Conn) error {
-	rows, err := conn.Query("select 1 from pg_publication where pubname = $1;", b.publicationName)
+	rows, err := conn.Query("select 1 from pg_publication where pubname = $1;", b.cfg.PublicationName)
 	if err != nil {
 		return fmt.Errorf("could not execute query: %v", err)
 	}
@@ -533,7 +520,7 @@ func (b *LogicalBackup) initPublication(conn *pgx.Conn) error {
 	rows.Close()
 
 	query := fmt.Sprintf("create publication %s for all tables",
-		pgx.Identifier{b.publicationName}.Sanitize())
+		pgx.Identifier{b.cfg.PublicationName}.Sanitize())
 
 	if _, err := conn.Exec(query); err != nil {
 		return fmt.Errorf("could not create publication: %v", err)
@@ -660,11 +647,13 @@ func (b *LogicalBackup) Run() {
 	b.waitGr.Add(1)
 	go b.startReplication()
 
-	log.Printf("Starting %d background backupers", b.concurrentBasebackups)
-	for i := 0; i < b.concurrentBasebackups; i++ {
+	log.Printf("Starting %d background backupers", b.cfg.ConcurrentBasebackups)
+	for i := 0; i < b.cfg.ConcurrentBasebackups; i++ {
 		b.waitGr.Add(1)
 		go b.BackgroundBasebackuper()
 	}
 
-	b.queueBbTables()
+	if b.cfg.InitialBasebackup {
+		b.queueBbTables()
+	}
 }

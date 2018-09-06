@@ -18,6 +18,7 @@ type Config struct {
 	DeltasPerFile         int            `yaml:"deltasPerFile"`
 	BackupThreshold       int            `yaml:"backupThreshold"`
 	ConcurrentBasebackups int            `yaml:"concurrentBasebackups"`
+	InitialBasebackup     bool           `yaml:"initialBasebackup"`
 }
 
 func New(filename string) (*Config, error) {

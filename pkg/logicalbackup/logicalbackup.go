@@ -201,7 +201,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
 					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
-						if tb, tErr := tablebackup.New(b.ctx, b.cfg.Dir, tblName, b.connCfg, time.Minute, b.bbQueue, b.cfg.DeltasPerFile, b.cfg.BackupThreshold); tErr != nil {
+						if tb, tErr := tablebackup.New(b.ctx, b.cfg.Dir, tblName, b.connCfg, time.Minute, b.bbQueue, b.cfg.DeltasPerFile, b.cfg.BackupThreshold, b.cfg.Fsync); tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
 							b.backupTables[v.OID] = tb
@@ -503,7 +503,8 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 			time.Minute,
 			b.bbQueue,
 			b.cfg.DeltasPerFile,
-			b.cfg.BackupThreshold)
+			b.cfg.BackupThreshold,
+			b.cfg.Fsync)
 
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)

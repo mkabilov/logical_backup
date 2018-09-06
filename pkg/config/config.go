@@ -20,6 +20,7 @@ type Config struct {
 	ConcurrentBasebackups int            `yaml:"concurrentBasebackups"`
 	InitialBasebackup     bool           `yaml:"initialBasebackup"`
 	SendStatusOnCommit    bool           `yaml:"sendStatusOnCommit"`
+	Fsync                 bool           `yaml:"fsync"`
 }
 
 func New(filename string) (*Config, error) {

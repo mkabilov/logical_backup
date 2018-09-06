@@ -33,6 +33,7 @@ type TableBackuper interface {
 
 type TableBackup struct {
 	message.Identifier
+	fsync bool
 
 	ctx context.Context
 
@@ -72,7 +73,7 @@ type TableBackup struct {
 }
 
 func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pgx.ConnConfig,
-	backupPeriod time.Duration, bbQueue *queue.Queue, deltasPerFile, backupThreshold int) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
+	backupPeriod time.Duration, bbQueue *queue.Queue, deltasPerFile, backupThreshold int, fsync bool) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
 	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
 		if err := os.Mkdir(baseDir, dirPerms); err != nil {
 			return nil, fmt.Errorf("could not create base dir: %v", err)
@@ -99,6 +100,7 @@ func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pg
 		infoFilename:         path.Join(tableDir, "info.yaml"),
 		periodBetweenBackups: backupPeriod,
 		backupThreshold:      backupThreshold,
+		fsync:                fsync,
 	}
 
 	if _, err := os.Stat(tb.deltasDir); os.IsNotExist(err) {
@@ -152,6 +154,7 @@ func (t *TableBackup) SaveDelta(msg message.DeltaMessage) error {
 	if err != nil {
 		return fmt.Errorf("could not save delta: %v", err)
 	}
+
 	if err := t.currentDeltaFp.Sync(); err != nil {
 		return fmt.Errorf("could not fsync: %v", err)
 	}

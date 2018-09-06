@@ -375,6 +375,12 @@ func (b *LogicalBackup) startReplication() error {
 			if err != nil {
 				return fmt.Errorf("replication failed: %s", err)
 			}
+
+			if repMsg == nil {
+				log.Printf("receieved null replication message")
+				return fmt.Errorf("null replication message")
+			}
+
 			if repMsg.WalMessage != nil {
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {

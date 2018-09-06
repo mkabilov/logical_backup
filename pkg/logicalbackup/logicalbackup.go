@@ -58,7 +58,7 @@ type LogicalBackup struct {
 
 	storedRestartLSN uint64
 	startLSN         uint64
-	restartLSN       uint64
+	flushLSN         uint64
 	lastOrigin       string
 	lastTxId         int32
 
@@ -192,7 +192,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 				err = bt.SaveDelta(message.DDLMessage{ // alter table %s rename to %s
 					TxId:        b.lastTxId,
-					LastLSN:     b.restartLSN,
+					LastLSN:     b.flushLSN,
 					RelationOID: v.OID,
 					Origin:      b.lastOrigin,
 					Query:       v.SQL(oldRel),
@@ -229,7 +229,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 				err = bt.SaveDelta(message.DDLMessage{
 					TxId:        b.lastTxId,
-					LastLSN:     b.restartLSN,
+					LastLSN:     b.flushLSN,
 					RelationOID: v.OID,
 					Origin:      b.lastOrigin,
 					Query:       v.SQL(oldRel),
@@ -252,7 +252,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 		err := b.backupTables[v.RelationOID].SaveDelta(message.DMLMessage{
 			TxId:        b.lastTxId,
-			LastLSN:     b.restartLSN,
+			LastLSN:     b.flushLSN,
 			RelationOID: v.RelationOID,
 			Origin:      b.lastOrigin,
 			Query:       v.SQL(rel),
@@ -273,7 +273,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 		err := b.backupTables[v.RelationOID].SaveDelta(message.DMLMessage{
 			TxId:        b.lastTxId,
-			LastLSN:     b.restartLSN,
+			LastLSN:     b.flushLSN,
 			RelationOID: v.RelationOID,
 			Origin:      b.lastOrigin,
 			Query:       v.SQL(rel),
@@ -294,7 +294,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 		err := b.backupTables[v.RelationOID].SaveDelta(message.DMLMessage{
 			TxId:        b.lastTxId,
-			LastLSN:     b.restartLSN,
+			LastLSN:     b.flushLSN,
 			RelationOID: v.RelationOID,
 			Origin:      b.lastOrigin,
 			Query:       v.SQL(rel),
@@ -304,7 +304,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		}
 	case message.Begin:
 		b.lastTxId = v.XID
-		b.restartLSN = v.FinalLSN
+		b.flushLSN = v.FinalLSN
 		b.lastOrigin = ""
 	case message.Commit:
 		if b.cfg.SendStatusOnCommit {
@@ -326,8 +326,8 @@ func (b *LogicalBackup) handler(m message.Message) error {
 }
 
 func (b *LogicalBackup) sendStatus() error {
-	//log.Printf("sending new status with %s restart lsn", pgx.FormatLSN(b.restartLSN))
-	status, err := pgx.NewStandbyStatus(b.restartLSN)
+	log.Printf("sending new status with %s flush lsn", pgx.FormatLSN(b.flushLSN))
+	status, err := pgx.NewStandbyStatus(b.flushLSN)
 
 	if err != nil {
 		return fmt.Errorf("error creating standby status: %s", err)
@@ -337,13 +337,13 @@ func (b *LogicalBackup) sendStatus() error {
 		return fmt.Errorf("failed to send standy status: %s", err)
 	}
 
-	if b.storedRestartLSN != b.restartLSN {
+	if b.storedRestartLSN != b.flushLSN {
 		if err := b.storeRestartLSN(); err != nil {
 			return err
 		}
 	}
 
-	b.storedRestartLSN = b.restartLSN
+	b.storedRestartLSN = b.flushLSN
 
 	return nil
 }
@@ -576,7 +576,7 @@ func (b *LogicalBackup) storeRestartLSN() error {
 	err = yaml.NewEncoder(fp).Encode(struct {
 		Timestamp  time.Time
 		CurrentLSN string
-	}{time.Now(), pgx.FormatLSN(b.restartLSN)})
+	}{time.Now(), pgx.FormatLSN(b.flushLSN)})
 	if err != nil {
 		return fmt.Errorf("could not save current lsn: %v", err)
 	}

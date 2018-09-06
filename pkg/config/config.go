@@ -19,6 +19,7 @@ type Config struct {
 	BackupThreshold       int            `yaml:"backupThreshold"`
 	ConcurrentBasebackups int            `yaml:"concurrentBasebackups"`
 	InitialBasebackup     bool           `yaml:"initialBasebackup"`
+	SendStatusOnCommit    bool           `yaml:"sendStatusOnCommit"`
 }
 
 func New(filename string) (*Config, error) {

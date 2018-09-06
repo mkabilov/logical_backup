@@ -26,7 +26,7 @@ const (
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
 
-	statusTimeout = time.Second * 10
+	statusTimeout = time.Second * 60
 	waitTimeout   = time.Second * 10
 	backupsPeriod = time.Minute * 10
 )
@@ -307,8 +307,10 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		b.restartLSN = v.FinalLSN
 		b.lastOrigin = ""
 	case message.Commit:
-		if err := b.sendStatus(); err != nil {
-			return err
+		if b.cfg.SendStatusOnCommit {
+			if err := b.sendStatus(); err != nil {
+				return err
+			}
 		}
 	case message.Origin:
 		b.lastOrigin = v.Name

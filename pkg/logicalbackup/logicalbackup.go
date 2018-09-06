@@ -462,14 +462,10 @@ func (b *LogicalBackup) Wait() {
 }
 
 func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
-	query := `select
-		c.oid,
-        n.nspname,
-        c.relname
-    from pg_publication p, 
-		 pg_class C
-    inner join pg_namespace n on (n.oid = c.relnamespace)
-    where C.oid in (select relid from pg_get_publication_tables(P.pubname))`
+	query := `select n.nspname, c.relname
+     from pg_class c
+     inner join pg_namespace n on (n.oid = c.relnamespace)
+     inner join pg_get_publication_tables('%s') x on x.relid = c.oid;`
 
 	if len(tables) > 0 {
 		tbls := make([]string, 0)
@@ -477,8 +473,9 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 			tbls = append(tbls, fmt.Sprintf("'%s'", t))
 		}
 
-		query += " and n.nspname || '.' || c.relname in (" + strings.Join(tbls, ", ") + ")"
+		query += " where n.nspname || '.' || c.relname in (" + strings.Join(tbls, ", ") + ")"
 	}
+	query = fmt.Sprintf(query, b.cfg.PublicationName)
 
 	rows, err := conn.Query(query)
 	if err != nil {

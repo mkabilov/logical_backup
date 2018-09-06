@@ -155,8 +155,10 @@ func (t *TableBackup) SaveDelta(msg message.DeltaMessage) error {
 		return fmt.Errorf("could not save delta: %v", err)
 	}
 
-	if err := t.currentDeltaFp.Sync(); err != nil {
-		return fmt.Errorf("could not fsync: %v", err)
+	if t.fsync {
+		if err := t.currentDeltaFp.Sync(); err != nil {
+			return fmt.Errorf("could not fsync: %v", err)
+		}
 	}
 
 	return nil

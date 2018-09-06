@@ -26,7 +26,7 @@ const (
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
 
-	statusTimeout = time.Second * 60
+	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
 	backupsPeriod = time.Minute * 10
 )

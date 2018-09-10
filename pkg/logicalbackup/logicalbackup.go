@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/http"
+	"net/http/pprof"
 	"os"
 	"path"
 	"strings"
@@ -21,6 +23,8 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
 )
 
+type cmdType int
+
 const (
 	applicationName = "logical_backup"
 	outputPlugin    = "pgoutput"
@@ -29,6 +33,10 @@ const (
 	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
 	backupsPeriod = time.Minute * 10
+
+	cInsert cmdType = iota
+	cUpdate
+	cDelete
 )
 
 type LogicalBackuper interface {
@@ -56,15 +64,19 @@ type LogicalBackup struct {
 	relationNames map[uint32]message.Identifier
 	types         map[uint32]message.Type
 
-	storedRestartLSN uint64
-	startLSN         uint64
-	flushLSN         uint64
-	lastOrigin       string
-	lastTxId         int32
+	storedFlushLSN uint64
+	startLSN       uint64
+	flushLSN       uint64
+	lastOrigin     string
+	lastTxId       int32
 
 	bbQueue    *queue.Queue
 	bbInterval time.Duration
 	waitGr     *sync.WaitGroup
+
+	msgCnt map[cmdType]int
+
+	srv http.Server
 }
 
 func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
@@ -76,6 +88,14 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 
 	pgxConn := cfg.DB
 	pgxConn.RuntimeParams = map[string]string{"application_name": applicationName}
+
+	mux := http.NewServeMux()
+
+	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
 		ctx:                    ctx,
@@ -92,6 +112,11 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		stateFilename:          path.Join(cfg.Dir, "state.yaml"),
 		bbInterval:             backupsPeriod,
 		cfg:                    cfg,
+		msgCnt:                 make(map[cmdType]int),
+		srv: http.Server{
+			Addr:    fmt.Sprintf(":%d", 8080),                    // TODO: get rid of the hardcoded value
+			Handler: http.TimeoutHandler(mux, time.Second*5, ""), // TODO: get rid of the hardcoded value
+		},
 	}
 
 	conn, err := pgx.Connect(pgxConn)
@@ -132,7 +157,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	}
 
 	if rc, err := pgx.ReplicationConnect(cfg.DB); err != nil {
-		return nil, fmt.Errorf("could not replication connect: %v", err)
+		return nil, fmt.Errorf("could not connect using replication protocol: %v", err)
 	} else {
 		lb.replConn = rc
 	}
@@ -157,7 +182,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		}
 		if startLSN != 0 {
 			lb.startLSN = startLSN
-			lb.storedRestartLSN = startLSN
+			lb.storedFlushLSN = startLSN
 		}
 	}
 
@@ -240,6 +265,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		b.relations[tblName] = v
 		b.relationNames[v.OID] = tblName
 	case message.Insert:
+		b.msgCnt[cInsert]++
 		tbl := b.relationNames[v.RelationOID]
 
 		rel, ok := b.relations[tbl] //TODO: check if key exists
@@ -261,6 +287,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 			return fmt.Errorf("could not save delta: %v", err)
 		}
 	case message.Update:
+		b.msgCnt[cUpdate]++
 		tbl := b.relationNames[v.RelationOID]
 		rel, ok := b.relations[tbl] //TODO: check if key exists
 
@@ -282,6 +309,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 			return fmt.Errorf("could not save delta: %v", err)
 		}
 	case message.Delete:
+		b.msgCnt[cDelete]++
 		tbl := b.relationNames[v.RelationOID]
 		rel, ok := b.relations[tbl] //TODO: check if key exists
 
@@ -326,7 +354,11 @@ func (b *LogicalBackup) handler(m message.Message) error {
 }
 
 func (b *LogicalBackup) sendStatus() error {
-	log.Printf("sending new status with %s flush lsn", pgx.FormatLSN(b.flushLSN))
+	log.Printf("sending new status with %s flush lsn(i:%d u:%d d:%d) ",
+		pgx.FormatLSN(b.flushLSN), b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete])
+
+	b.msgCnt = make(map[cmdType]int)
+
 	status, err := pgx.NewStandbyStatus(b.flushLSN)
 
 	if err != nil {
@@ -337,13 +369,13 @@ func (b *LogicalBackup) sendStatus() error {
 		return fmt.Errorf("failed to send standy status: %s", err)
 	}
 
-	if b.storedRestartLSN != b.flushLSN {
+	if b.storedFlushLSN != b.flushLSN {
 		if err := b.storeRestartLSN(); err != nil {
 			return err
 		}
 	}
 
-	b.storedRestartLSN = b.flushLSN
+	b.storedFlushLSN = b.flushLSN
 
 	return nil
 }
@@ -658,6 +690,12 @@ func (b *LogicalBackup) Run() {
 		b.waitGr.Add(1)
 		go b.BackgroundBasebackuper()
 	}
+
+	go func() {
+		if err2 := b.srv.ListenAndServe(); err2 != http.ErrServerClosed {
+			log.Fatalf("Could not start http server: %v", err2)
+		}
+	}()
 
 	if b.cfg.InitialBasebackup {
 		log.Printf("Queueing tables for the initial backup")

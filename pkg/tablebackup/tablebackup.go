@@ -1,6 +1,8 @@
 package tablebackup
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/md5"
 	"fmt"
@@ -150,8 +152,8 @@ func (t *TableBackup) SaveDelta(msg message.DeltaMessage) error {
 	t.deltaCnt++
 
 	deltaMsg := fmt.Sprintf(message.DeltaMessageFormat+"\n", lsn, txId, query)
-	_, err := t.currentDeltaFp.WriteString(deltaMsg)
-	if err != nil {
+
+	if _, err := t.currentDeltaFp.Write(compress(deltaMsg)); err != nil {
 		return fmt.Errorf("could not save delta: %v", err)
 	}
 
@@ -388,4 +390,21 @@ ORDER BY
 
 func hash(tbl message.Identifier) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(tbl.Sanitize())))
+}
+
+func compress(str string) []byte {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+
+	if _, err := gz.Write([]byte(str)); err != nil {
+		log.Printf("could not gzip: %v", err)
+	}
+	if err := gz.Flush(); err != nil {
+		log.Printf("could not flush: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		log.Printf("could not close: %v", err)
+	}
+
+	return b.Bytes()
 }

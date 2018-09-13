@@ -31,6 +31,9 @@ func main() {
 		cfg.Slotname, cfg.PublicationName)
 	log.Printf("Backing up new tables: %t", cfg.TrackNewTables)
 
+	log.Printf("Fsync: %t", cfg.Fsync)
+	log.Printf("SendStatusOnCommit: %t", cfg.SendStatusOnCommit)
+
 	lb, err := logicalbackup.New(ctx, cfg)
 	if err != nil {
 		log.Fatalf("could not create backup instance: %v", err)

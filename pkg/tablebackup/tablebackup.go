@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
@@ -26,7 +27,7 @@ const (
 )
 
 type TableBackuper interface {
-	SaveDelta(message.DeltaMessage) error
+	SaveRawMessage([]byte, uint64) (uint64, error)
 	Basebackup() error
 	Files() int
 	Truncate() error
@@ -72,6 +73,7 @@ type TableBackup struct {
 	locker uint32
 
 	bbQueue *queue.Queue
+	msgLen  []byte
 }
 
 func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pgx.ConnConfig,
@@ -103,6 +105,7 @@ func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pg
 		periodBetweenBackups: backupPeriod,
 		backupThreshold:      backupThreshold,
 		fsync:                fsync,
+		msgLen:               make([]byte, 8),
 	}
 
 	if _, err := os.Stat(tb.deltasDir); os.IsNotExist(err) {
@@ -118,29 +121,17 @@ func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pg
 	return &tb, nil
 }
 
-func (t *TableBackup) SaveDelta(msg message.DeltaMessage) error {
-	query := msg.GetSQL()
-	if query == "" {
-		return nil
-	}
-
-	lsn := msg.GetLSN()
-	if lsn < t.basebackupLSN {
-		return nil
-	}
-
-	txId := msg.GetTxId()
-
+func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	// init
 	if t.currentDeltaFp == nil {
 		if err := t.rotateFile(lsn); err != nil {
-			return fmt.Errorf("could not create file: %v", err)
+			return 0, fmt.Errorf("could not create file: %v", err)
 		}
 	}
 
 	if t.deltaCnt >= t.deltasPerFile {
 		if err := t.rotateFile(lsn); err != nil {
-			return fmt.Errorf("could not rotate file: %v", err)
+			return 0, fmt.Errorf("could not rotate file: %v", err)
 		}
 	}
 
@@ -151,19 +142,22 @@ func (t *TableBackup) SaveDelta(msg message.DeltaMessage) error {
 
 	t.deltaCnt++
 
-	deltaMsg := fmt.Sprintf(message.DeltaMessageFormat+"\n", lsn, txId, query)
+	ln := uint64(len(msg) + 8)
 
-	if _, err := t.currentDeltaFp.Write(compress(deltaMsg)); err != nil {
-		return fmt.Errorf("could not save delta: %v", err)
+	binary.BigEndian.PutUint64(t.msgLen, ln)
+
+	_, err := t.currentDeltaFp.Write(append(t.msgLen, msg...))
+	if err != nil {
+		return 0, fmt.Errorf("could not save delta: %v", err)
 	}
 
 	if t.fsync {
 		if err := t.currentDeltaFp.Sync(); err != nil {
-			return fmt.Errorf("could not fsync: %v", err)
+			return 0, fmt.Errorf("could not fsync: %v", err)
 		}
 	}
 
-	return nil
+	return ln, nil
 }
 
 func (t *TableBackup) Files() int {
@@ -235,7 +229,11 @@ func (t *TableBackup) Basebackup() error {
 		return fmt.Errorf("could not create info file: %v", err)
 	}
 	defer infoFp.Close()
-	defer os.Remove(tempFilename)
+	defer func() {
+		if _, err := os.Stat(tempFilename); os.IsExist(err) {
+			os.Remove(tempFilename)
+		}
+	}()
 
 	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= t.sleepBetweenBackups {
 		log.Printf("base backups happening too often; skipping")
@@ -314,6 +312,13 @@ func (t *TableBackup) Truncate() error {
 			return fmt.Errorf("could not create table dir: %v", err)
 		}
 	}
+
+	if _, err := os.Stat(t.deltasDir); os.IsNotExist(err) {
+		if err := os.Mkdir(t.deltasDir, dirPerms); err != nil {
+			return fmt.Errorf("could not create delta dir: %v", err)
+		}
+	}
+
 	t.currentDeltaFp = nil
 	t.deltaCnt = 0
 	t.deltaFilesCnt = 0

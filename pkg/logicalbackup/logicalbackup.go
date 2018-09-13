@@ -74,7 +74,8 @@ type LogicalBackup struct {
 	bbInterval time.Duration
 	waitGr     *sync.WaitGroup
 
-	msgCnt map[cmdType]int
+	msgCnt       map[cmdType]int
+	bytesWritten uint64
 
 	srv http.Server
 }
@@ -125,7 +126,9 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	}
 	defer conn.Close()
 
-	//TODO: have a separate command "init" which will set replica identity and create replication slots/publications
+	log.Printf("My PID: %d", conn.PID())
+
+	//TODO: have a separate "init" command which will set replica identity and create replication slots/publications
 	if err := lb.checkPgParams(conn); err != nil {
 		return nil, err
 	}
@@ -152,8 +155,6 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		for _, t := range lb.backupTables {
 			tables = append(tables, t.String())
 		}
-
-		log.Printf("backup tables: %v", strings.Join(tables, ", "))
 	}
 
 	if rc, err := pgx.ReplicationConnect(cfg.DB); err != nil {
@@ -196,8 +197,11 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	return lb, nil
 }
 
-func (b *LogicalBackup) handler(m message.Message) error {
-	var err error
+func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
+	var (
+		err error
+		ln  uint64
+	)
 
 	switch v := m.(type) {
 	case message.Relation:
@@ -215,13 +219,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 					break
 				}
 
-				err = bt.SaveDelta(message.DDLMessage{ // alter table %s rename to %s
-					TxId:        b.lastTxId,
-					LastLSN:     b.flushLSN,
-					RelationOID: v.OID,
-					Origin:      b.lastOrigin,
-					Query:       v.SQL(oldRel),
-				})
+				ln, err = bt.SaveRawMessage(raw, b.flushLSN)
 			} else { // new table
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
 					if b.cfg.TrackNewTables {
@@ -245,6 +243,8 @@ func (b *LogicalBackup) handler(m message.Message) error {
 					break
 				}
 				err = bt.Truncate()
+
+				b.backupTables[v.OID] = b.backupTables[oldRel.OID]
 			} else {
 				bt, ok := b.backupTables[v.OID]
 				if !ok {
@@ -252,13 +252,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 					break
 				}
 
-				err = bt.SaveDelta(message.DDLMessage{
-					TxId:        b.lastTxId,
-					LastLSN:     b.flushLSN,
-					RelationOID: v.OID,
-					Origin:      b.lastOrigin,
-					Query:       v.SQL(oldRel),
-				})
+				ln, err = bt.SaveRawMessage(raw, b.flushLSN)
 			}
 		}
 
@@ -266,80 +260,29 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		b.relationNames[v.OID] = tblName
 	case message.Insert:
 		b.msgCnt[cInsert]++
-		tbl := b.relationNames[v.RelationOID]
 
-		rel, ok := b.relations[tbl] //TODO: check if key exists
-		if !ok {
-			return fmt.Errorf("could not find table %v", v.RelationOID)
-		}
-		if _, ok := b.backupTables[v.RelationOID]; !ok {
-			break
-		}
-
-		err := b.backupTables[v.RelationOID].SaveDelta(message.DMLMessage{
-			TxId:        b.lastTxId,
-			LastLSN:     b.flushLSN,
-			RelationOID: v.RelationOID,
-			Origin:      b.lastOrigin,
-			Query:       v.SQL(rel),
-		})
-		if err != nil {
-			return fmt.Errorf("could not save delta: %v", err)
-		}
+		ln, err = b.backupTables[v.RelationOID].SaveRawMessage(raw, b.flushLSN)
 	case message.Update:
 		b.msgCnt[cUpdate]++
-		tbl := b.relationNames[v.RelationOID]
-		rel, ok := b.relations[tbl] //TODO: check if key exists
-
-		if !ok {
-			return fmt.Errorf("could not find table %v", v.RelationOID)
-		}
 		if _, ok := b.backupTables[v.RelationOID]; !ok {
 			break
 		}
 
-		err := b.backupTables[v.RelationOID].SaveDelta(message.DMLMessage{
-			TxId:        b.lastTxId,
-			LastLSN:     b.flushLSN,
-			RelationOID: v.RelationOID,
-			Origin:      b.lastOrigin,
-			Query:       v.SQL(rel),
-		})
-		if err != nil {
-			return fmt.Errorf("could not save delta: %v", err)
-		}
+		ln, err = b.backupTables[v.RelationOID].SaveRawMessage(raw, b.flushLSN)
 	case message.Delete:
 		b.msgCnt[cDelete]++
-		tbl := b.relationNames[v.RelationOID]
-		rel, ok := b.relations[tbl] //TODO: check if key exists
 
-		if !ok {
-			return fmt.Errorf("could not find table %v", v.RelationOID)
-		}
-		if _, ok := b.backupTables[v.RelationOID]; !ok {
-			break
-		}
-
-		err := b.backupTables[v.RelationOID].SaveDelta(message.DMLMessage{
-			TxId:        b.lastTxId,
-			LastLSN:     b.flushLSN,
-			RelationOID: v.RelationOID,
-			Origin:      b.lastOrigin,
-			Query:       v.SQL(rel),
-		})
-		if err != nil {
-			return fmt.Errorf("could not save delta: %v", err)
-		}
+		ln, err = b.backupTables[v.RelationOID].SaveRawMessage(raw, b.flushLSN)
 	case message.Begin:
 		b.lastTxId = v.XID
 		b.flushLSN = v.FinalLSN
 		b.lastOrigin = ""
 	case message.Commit:
-		if b.cfg.SendStatusOnCommit {
-			if err := b.sendStatus(); err != nil {
-				return err
-			}
+		if !b.cfg.SendStatusOnCommit {
+			break
 		}
+
+		err = b.sendStatus()
 	case message.Origin:
 		b.lastOrigin = v.Name
 	case message.Truncate:
@@ -350,14 +293,17 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		}
 	}
 
+	b.bytesWritten += ln
+
 	return err
 }
 
 func (b *LogicalBackup) sendStatus() error {
-	log.Printf("sending new status with %s flush lsn(i:%d u:%d d:%d) ",
-		pgx.FormatLSN(b.flushLSN), b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete])
+	log.Printf("sending new status with %s flush lsn (i:%d u:%d d:%d b:%0.2fMb) ",
+		pgx.FormatLSN(b.flushLSN), b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete], float64(b.bytesWritten)/1048576)
 
 	b.msgCnt = make(map[cmdType]int)
+	b.bytesWritten = 0
 
 	status, err := pgx.NewStandbyStatus(b.flushLSN)
 
@@ -387,17 +333,17 @@ func (b *LogicalBackup) startReplication() error {
 
 	err := b.replConn.StartReplication(b.cfg.Slotname, b.startLSN, -1, b.pluginArgs...)
 	if err != nil {
-		return fmt.Errorf("failed to start replication: %s", err)
+		log.Fatalf("failed to start replication: %s", err)
 	}
 
 	ticker := time.NewTicker(b.statusTimeout)
 	for {
 		select {
 		case <-b.ctx.Done():
-			return b.ctx.Err()
+			log.Fatalf("context error: %v", b.ctx.Err())
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
-				return err
+				log.Fatalf("could not send status: %v", err)
 			}
 		default:
 			wctx, cancel := context.WithTimeout(b.ctx, b.replMessageWaitTimeout)
@@ -407,27 +353,28 @@ func (b *LogicalBackup) startReplication() error {
 				continue
 			}
 			if err != nil {
-				return fmt.Errorf("replication failed: %s", err)
+				log.Fatalf("replication failed: %s", err)
 			}
 
 			if repMsg == nil {
 				log.Printf("receieved null replication message")
-				return fmt.Errorf("null replication message")
+				continue
 			}
 
 			if repMsg.WalMessage != nil {
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
-					return fmt.Errorf("invalid pgoutput message: %s", err)
+					log.Fatalf("invalid pgoutput message: %s", err)
 				}
-				if err := b.handler(logmsg); err != nil {
-					return fmt.Errorf("error handling waldata: %s", err)
+				if err := b.handler(logmsg, repMsg.WalMessage.WalData); err != nil {
+					log.Fatalf("error handling waldata: %s", err)
 				}
 			}
+
 			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
 				log.Println("server wants a reply")
 				if err := b.sendStatus(); err != nil {
-					return err
+					log.Fatalf("could not send status: %v", err)
 				}
 			}
 		}

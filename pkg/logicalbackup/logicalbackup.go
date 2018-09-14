@@ -67,7 +67,6 @@ type LogicalBackup struct {
 	storedFlushLSN uint64
 	startLSN       uint64
 	flushLSN       uint64
-	lastOrigin     string
 	lastTxId       int32
 
 	bbQueue    *queue.Queue
@@ -76,6 +75,10 @@ type LogicalBackup struct {
 
 	msgCnt       map[cmdType]int
 	bytesWritten uint64
+
+	txBeginRelMsg map[uint32]struct{}
+	beginMsg      []byte
+	typeMsg       []byte
 
 	srv http.Server
 }
@@ -197,11 +200,47 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	return lb, nil
 }
 
+func (b *LogicalBackup) saveRawMessage(tableOID uint32, raw []byte) error {
+	var err error
+
+	bt, ok := b.backupTables[tableOID]
+	if !ok {
+		log.Printf("table is not tracked %s", b.relationNames[tableOID])
+		return nil
+	}
+
+	if _, ok := b.txBeginRelMsg[tableOID]; !ok {
+		ln, err := bt.SaveRawMessage(b.beginMsg, b.flushLSN)
+		if err != nil {
+			return fmt.Errorf("could not save begin message: %v", err)
+		}
+
+		b.bytesWritten += ln
+		b.txBeginRelMsg[tableOID] = struct{}{}
+	}
+
+	if b.typeMsg != nil {
+		ln, err := bt.SaveRawMessage(b.typeMsg, b.flushLSN)
+		if err != nil {
+			return fmt.Errorf("could not save type message: %v", err)
+		}
+
+		b.bytesWritten += ln
+		b.typeMsg = nil
+	}
+
+	ln, err := bt.SaveRawMessage(raw, b.flushLSN)
+	if err != nil {
+		return fmt.Errorf("could not save message: %v", err)
+	}
+
+	b.bytesWritten += ln
+
+	return nil
+}
+
 func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
-	var (
-		err error
-		ln  uint64
-	)
+	var err error
 
 	switch v := m.(type) {
 	case message.Relation:
@@ -212,14 +251,7 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 				delete(b.relations, oldTblName)
 				delete(b.relationNames, v.OID)
 
-				bt, ok := b.backupTables[v.OID]
-				if !ok {
-					log.Printf("table is not tracked %s", tblName)
-					// table is not tracked — skip it
-					break
-				}
-
-				ln, err = bt.SaveRawMessage(raw, b.flushLSN)
+				err = b.saveRawMessage(v.OID, raw)
 			} else { // new table
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
 					if b.cfg.TrackNewTables {
@@ -246,13 +278,7 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 
 				b.backupTables[v.OID] = b.backupTables[oldRel.OID]
 			} else {
-				bt, ok := b.backupTables[v.OID]
-				if !ok {
-					// table is not tracked — skip it
-					break
-				}
-
-				ln, err = bt.SaveRawMessage(raw, b.flushLSN)
+				err = b.saveRawMessage(v.OID, raw)
 			}
 		}
 
@@ -261,39 +287,52 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 	case message.Insert:
 		b.msgCnt[cInsert]++
 
-		ln, err = b.backupTables[v.RelationOID].SaveRawMessage(raw, b.flushLSN)
+		err = b.saveRawMessage(v.RelationOID, raw)
 	case message.Update:
 		b.msgCnt[cUpdate]++
-		if _, ok := b.backupTables[v.RelationOID]; !ok {
-			break
-		}
 
-		ln, err = b.backupTables[v.RelationOID].SaveRawMessage(raw, b.flushLSN)
+		err = b.saveRawMessage(v.RelationOID, raw)
 	case message.Delete:
 		b.msgCnt[cDelete]++
 
-		ln, err = b.backupTables[v.RelationOID].SaveRawMessage(raw, b.flushLSN)
+		err = b.saveRawMessage(v.RelationOID, raw)
 	case message.Begin:
 		b.lastTxId = v.XID
 		b.flushLSN = v.FinalLSN
-		b.lastOrigin = ""
+
+		b.txBeginRelMsg = make(map[uint32]struct{})
+		b.beginMsg = make([]byte, len(raw))
+		copy(b.beginMsg, raw)
 	case message.Commit:
+		var ln uint64
+		for relOID := range b.txBeginRelMsg {
+			ln, err = b.backupTables[relOID].SaveRawMessage(raw, b.flushLSN)
+			if err != nil {
+				break
+			}
+
+			b.bytesWritten += ln
+		}
+
 		if !b.cfg.SendStatusOnCommit {
 			break
 		}
 
-		err = b.sendStatus()
+		if err == nil {
+			err = b.sendStatus()
+		}
 	case message.Origin:
-		b.lastOrigin = v.Name
+		//TODO:
 	case message.Truncate:
 		//TODO:
 	case message.Type:
 		if _, ok := b.types[v.ID]; !ok {
 			b.types[v.ID] = v
 		}
-	}
 
-	b.bytesWritten += ln
+		b.typeMsg = make([]byte, len(raw))
+		copy(b.typeMsg, raw)
+	}
 
 	return err
 }

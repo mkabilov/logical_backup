@@ -30,6 +30,7 @@ type TableBackuper interface {
 	Files() int
 	Truncate() error
 	String() string
+	CloseOldFiles() error
 }
 
 type TableBackup struct {
@@ -67,6 +68,7 @@ type TableBackup struct {
 	sleepBetweenBackups  time.Duration
 	periodBetweenBackups time.Duration
 	lastBackupDuration   time.Duration
+	lastWrittenMessage   time.Time
 
 	locker uint32
 
@@ -147,6 +149,8 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 		}
 	}
 
+	t.lastWrittenMessage = time.Now()
+
 	return ln, nil
 }
 
@@ -162,7 +166,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 	}
 
 	filename := fmt.Sprintf("%s/%016x", t.deltasDir, newLSN)
-	if t.lastLSN == newLSN {
+	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
 		t.filenamePostfix++
 	} else {
 		t.filenamePostfix = 0
@@ -318,6 +322,18 @@ func (t *TableBackup) Truncate() error {
 	t.filenamePostfix = 0
 
 	return nil
+}
+
+func (t *TableBackup) CloseOldFiles() error {
+	if t.lastWrittenMessage.IsZero() {
+		return nil
+	}
+
+	if !t.lastWrittenMessage.IsZero() && time.Since(t.lastWrittenMessage) <= time.Hour*3 {
+		return nil
+	}
+
+	return t.currentDeltaFp.Close()
 }
 
 func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, error) {

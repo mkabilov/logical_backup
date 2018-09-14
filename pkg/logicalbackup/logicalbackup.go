@@ -661,6 +661,24 @@ func (b *LogicalBackup) BackgroundBasebackuper() {
 	}
 }
 
+func (b *LogicalBackup) closeOldFiles() {
+	defer b.waitGr.Done()
+	ticker := time.NewTicker(time.Hour)
+
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-ticker.C:
+			for _, t := range b.backupTables {
+				if err := t.CloseOldFiles(); err != nil {
+					log.Printf("could not close %s: %v", t, err)
+				}
+			}
+		}
+	}
+}
+
 func (b *LogicalBackup) queueBbTables() {
 	for _, t := range b.backupTables {
 		b.bbQueue.Put(t)
@@ -682,6 +700,9 @@ func (b *LogicalBackup) Run() {
 			log.Fatalf("Could not start http server: %v", err2)
 		}
 	}()
+
+	b.waitGr.Add(1)
+	go b.closeOldFiles()
 
 	if b.cfg.InitialBasebackup {
 		log.Printf("Queueing tables for the initial backup")

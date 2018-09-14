@@ -84,12 +84,6 @@ func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pg
 
 	tblHash := hash(tbl)
 	tableDir := path.Join(baseDir, fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name))
-	if _, err := os.Stat(tableDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(tableDir, dirPerms); err != nil {
-			return nil, fmt.Errorf("could not create table dir: %v", err)
-		}
-	}
-
 	tb := TableBackup{
 		Identifier:           tbl,
 		ctx:                  ctx,
@@ -106,10 +100,8 @@ func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pg
 		msgLen:               make([]byte, 8),
 	}
 
-	if _, err := os.Stat(tb.deltasDir); os.IsNotExist(err) {
-		if err := os.Mkdir(tb.deltasDir, dirPerms); err != nil {
-			return nil, fmt.Errorf("could not create deltas dir: %v", err)
-		}
+	if err := tb.createDirs(); err != nil {
+		return nil, fmt.Errorf("could not create dirs: %v", err)
 	}
 
 	tb.bbQueue = bbQueue
@@ -301,20 +293,23 @@ func (t *TableBackup) String() string {
 	return t.Identifier.String()
 }
 
-func (t *TableBackup) Truncate() error {
-	if err := os.RemoveAll(t.tableDir); err != nil {
-		return fmt.Errorf("could not recreate table dir: %v", err)
-	}
-	if _, err := os.Stat(t.tableDir); os.IsNotExist(err) {
-		if err := os.Mkdir(t.tableDir, dirPerms); err != nil {
-			return fmt.Errorf("could not create table dir: %v", err)
-		}
-	}
-
+func (t *TableBackup) createDirs() error {
 	if _, err := os.Stat(t.deltasDir); os.IsNotExist(err) {
 		if err := os.Mkdir(t.deltasDir, dirPerms); err != nil {
 			return fmt.Errorf("could not create delta dir: %v", err)
 		}
+	}
+
+	return nil
+}
+
+func (t *TableBackup) Truncate() error {
+	if err := os.RemoveAll(t.tableDir); err != nil {
+		return fmt.Errorf("could not recreate table dir: %v", err)
+	}
+
+	if err := t.createDirs(); err != nil {
+		return err
 	}
 
 	t.currentDeltaFp = nil

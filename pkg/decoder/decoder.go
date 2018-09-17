@@ -93,73 +93,108 @@ func Parse(src []byte) (message.Message, error) {
 	d := &decoder{order: binary.BigEndian, buf: bytes.NewBuffer(src[1:])}
 	switch msgType {
 	case 'B':
-		b := message.Begin{}
-		b.FinalLSN = d.uint64()
-		b.Timestamp = d.timestamp()
-		b.XID = d.int32()
-
-		return b, nil
-	case 'C':
-		c := message.Commit{}
-		c.Flags = d.uint8()
-		c.LSN = d.uint64()
-		c.TransactionLSN = d.uint64()
-		c.Timestamp = d.timestamp()
-
-		return c, nil
-	case 'O':
-		o := message.Origin{}
-		o.LSN = d.uint64()
-		o.Name = d.string()
-
-		return o, nil
-	case 'R':
-		r := message.Relation{}
-		r.OID = d.uint32()
-		r.Namespace = d.string()
-		r.Name = d.string()
-		r.ReplicaIdentity = message.ReplicaIdentity(d.uint8())
-		r.Columns = d.columns()
-
-		return r, nil
-	case 'Y':
-		t := message.Type{}
-		t.ID = d.uint32()
-		t.Namespace = d.string()
-		t.Name = d.string()
-
-		return t, nil
-	case 'I':
-		i := message.Insert{}
-		i.RelationOID = d.uint32()
-		i.IsNew = d.uint8() == 'N'
-		i.NewRow = d.tupledata()
-
-		return i, nil
-	case 'U':
-		u := message.Update{}
-		u.RelationOID = d.uint32()
-		u.IsKey = d.rowInfo('K')
-		u.IsOld = d.rowInfo('O')
-		if u.IsKey || u.IsOld {
-			u.OldRow = d.tupledata()
+		m := message.Begin{
+			Raw: make([]byte, len(src)),
 		}
-		u.IsNew = d.uint8() == 'N'
-		u.NewRow = d.tupledata()
+		copy(m.Raw, src)
 
-		return u, nil
+		m.FinalLSN = d.uint64()
+		m.Timestamp = d.timestamp()
+		m.XID = d.int32()
+
+		return m, nil
+	case 'C':
+		m := message.Commit{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
+
+		m.Flags = d.uint8()
+		m.LSN = d.uint64()
+		m.TransactionLSN = d.uint64()
+		m.Timestamp = d.timestamp()
+
+		return m, nil
+	case 'O':
+		m := message.Origin{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
+
+		m.LSN = d.uint64()
+		m.Name = d.string()
+
+		return m, nil
+	case 'R':
+		m := message.Relation{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
+
+		m.OID = d.uint32()
+		m.Namespace = d.string()
+		m.Name = d.string()
+		m.ReplicaIdentity = message.ReplicaIdentity(d.uint8())
+		m.Columns = d.columns()
+
+		return m, nil
+	case 'Y':
+		m := message.Type{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
+
+		m.ID = d.uint32()
+		m.Namespace = d.string()
+		m.Name = d.string()
+
+		return m, nil
+	case 'I':
+		m := message.Insert{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
+
+		m.RelationOID = d.uint32()
+		m.IsNew = d.uint8() == 'N'
+		m.NewRow = d.tupledata()
+
+		return m, nil
+	case 'U':
+		m := message.Update{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
+
+		m.RelationOID = d.uint32()
+		m.IsKey = d.rowInfo('K')
+		m.IsOld = d.rowInfo('O')
+		if m.IsKey || m.IsOld {
+			m.OldRow = d.tupledata()
+		}
+		m.IsNew = d.uint8() == 'N'
+		m.NewRow = d.tupledata()
+
+		return m, nil
 	case 'D':
-		dl := message.Delete{}
-		dl.RelationOID = d.uint32()
-		dl.IsKey = d.rowInfo('K')
-		dl.IsOld = d.rowInfo('O')
-		dl.OldRow = d.tupledata()
+		m := message.Delete{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
 
-		return dl, nil
+		m.RelationOID = d.uint32()
+		m.IsKey = d.rowInfo('K')
+		m.IsOld = d.rowInfo('O')
+		m.OldRow = d.tupledata()
+
+		return m, nil
 	case 'T':
-		t := message.Truncate{}
+		m := message.Truncate{
+			Raw: make([]byte, len(src)),
+		}
+		copy(m.Raw, src)
 		//TODO
-		return t, nil
+		return m, nil
 	default:
 		return nil, fmt.Errorf("unknown message type for %s (%d)", []byte{msgType}, msgType)
 	}

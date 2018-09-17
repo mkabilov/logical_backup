@@ -44,6 +44,11 @@ func main() {
 
 	lb.Run()
 
+	if cfg.InitialBasebackup {
+		log.Printf("Queueing tables for the initial backup")
+		lb.QueueBasebackupTables()
+	}
+
 loop:
 	for {
 		switch sig := <-sigs; sig {

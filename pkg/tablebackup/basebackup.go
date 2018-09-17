@@ -147,7 +147,7 @@ func (t *TableBackup) copyDump() error {
 	if t.basebackupLSN == 0 {
 		return fmt.Errorf("no consistent point")
 	}
-	tempFilename := fmt.Sprintf("%s.new", t.bbFilename)
+	tempFilename := fmt.Sprintf("%s.new", t.basebackupFilename)
 	if _, err := os.Stat(tempFilename); os.IsExist(err) {
 		os.Remove(tempFilename)
 	}
@@ -166,7 +166,7 @@ func (t *TableBackup) copyDump() error {
 		os.Remove(tempFilename)
 		return fmt.Errorf("could not copy: %v", err)
 	}
-	if err := os.Rename(tempFilename, t.bbFilename); err != nil {
+	if err := os.Rename(tempFilename, t.basebackupFilename); err != nil {
 		return fmt.Errorf("could not move file: %v", err)
 	}
 

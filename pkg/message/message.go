@@ -70,6 +70,11 @@ type DMLMessage struct {
 	Query       string
 }
 
+type Identifier struct {
+	Namespace string
+	Name      string
+}
+
 type Column struct {
 	IsKey         bool   // column as part of the key.
 	Name          string // Name of the column.
@@ -84,12 +89,14 @@ type Tuple struct {
 }
 
 type Begin struct {
+	Raw       []byte
 	FinalLSN  uint64    // The final LastLSN of the transaction.
 	Timestamp time.Time // Commit timestamp of the transaction
 	XID       int32     // Xid of the transaction.
 }
 
 type Commit struct {
+	Raw            []byte
 	Flags          uint8     // Flags; currently unused (must be 0)
 	LSN            uint64    // The LastLSN of the commit.
 	TransactionLSN uint64    // The end LastLSN of the transaction.
@@ -97,23 +104,21 @@ type Commit struct {
 }
 
 type Origin struct {
+	Raw  []byte
 	LSN  uint64 // The LastLSN of the commit on the origin server.
 	Name string
 }
 
-type Identifier struct {
-	Namespace string
-	Name      string
-}
-
 type Relation struct {
 	Identifier
+	Raw             []byte
 	OID             uint32          // OID of the relation.
 	ReplicaIdentity ReplicaIdentity // Replica identity
 	Columns         []Column        // Columns
 }
 
 type Insert struct {
+	Raw         []byte
 	RelationOID uint32 // OID of the relation corresponding to the OID in the relation message.
 	IsNew       bool   // Identifies tuple as a new tuple.
 
@@ -121,6 +126,7 @@ type Insert struct {
 }
 
 type Update struct {
+	Raw         []byte
 	RelationOID uint32 /// OID of the relation corresponding to the OID in the relation message.
 	IsKey       bool   // OldRow contains columns which are part of REPLICA IDENTITY index.
 	IsOld       bool   // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
@@ -131,6 +137,7 @@ type Update struct {
 }
 
 type Delete struct {
+	Raw         []byte
 	RelationOID uint32 // OID of the relation corresponding to the OID in the relation message.
 	IsKey       bool   // OldRow contains columns which are part of REPLICA IDENTITY index.
 	IsOld       bool   // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
@@ -139,6 +146,7 @@ type Delete struct {
 }
 
 type Truncate struct {
+	Raw             []byte
 	Relations       uint32
 	Cascade         bool
 	RestartIdentity bool
@@ -146,6 +154,7 @@ type Truncate struct {
 }
 
 type Type struct {
+	Raw       []byte
 	ID        uint32 // OID of the data type
 	Namespace string // Namespace (empty string for pg_catalog).
 	Name      string // Name of the data type

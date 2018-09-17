@@ -69,9 +69,9 @@ type LogicalBackup struct {
 	flushLSN       uint64
 	lastTxId       int32
 
-	bbQueue    *queue.Queue
-	bbInterval time.Duration
-	waitGr     *sync.WaitGroup
+	basebackupQueue *queue.Queue
+	bbInterval      time.Duration
+	waitGr          *sync.WaitGroup
 
 	msgCnt       map[cmdType]int
 	bytesWritten uint64
@@ -111,7 +111,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		types:                  make(map[uint32]message.Type),
 		backupTables:           make(map[uint32]tablebackup.TableBackuper),
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
-		bbQueue:                queue.New(ctx),
+		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
 		stateFilename:          path.Join(cfg.Dir, "state.yaml"),
 		bbInterval:             backupsPeriod,
@@ -239,7 +239,7 @@ func (b *LogicalBackup) saveRawMessage(tableOID uint32, raw []byte) error {
 	return nil
 }
 
-func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
+func (b *LogicalBackup) handler(m message.Message) error {
 	var err error
 
 	switch v := m.(type) {
@@ -251,12 +251,14 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 				delete(b.relations, oldTblName)
 				delete(b.relationNames, v.OID)
 
-				err = b.saveRawMessage(v.OID, raw)
+				err = b.saveRawMessage(v.OID, v.Raw)
 			} else { // new table
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
 					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
-						if tb, tErr := tablebackup.New(b.ctx, b.cfg.Dir, tblName, b.connCfg, time.Minute, b.bbQueue, b.cfg.DeltasPerFile, b.cfg.BackupThreshold, b.cfg.Fsync); tErr != nil {
+						tb, tErr := tablebackup.New(b.ctx, b.cfg.Dir, tblName, b.connCfg, time.Minute,
+							b.basebackupQueue, b.cfg.DeltasPerFile, b.cfg.BackupThreshold, b.cfg.Fsync)
+						if tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
 							b.backupTables[v.OID] = tb
@@ -278,7 +280,7 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 
 				b.backupTables[v.OID] = b.backupTables[oldRel.OID]
 			} else {
-				err = b.saveRawMessage(v.OID, raw)
+				err = b.saveRawMessage(v.OID, v.Raw)
 			}
 		}
 
@@ -287,26 +289,25 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 	case message.Insert:
 		b.msgCnt[cInsert]++
 
-		err = b.saveRawMessage(v.RelationOID, raw)
+		err = b.saveRawMessage(v.RelationOID, v.Raw)
 	case message.Update:
 		b.msgCnt[cUpdate]++
 
-		err = b.saveRawMessage(v.RelationOID, raw)
+		err = b.saveRawMessage(v.RelationOID, v.Raw)
 	case message.Delete:
 		b.msgCnt[cDelete]++
 
-		err = b.saveRawMessage(v.RelationOID, raw)
+		err = b.saveRawMessage(v.RelationOID, v.Raw)
 	case message.Begin:
 		b.lastTxId = v.XID
 		b.flushLSN = v.FinalLSN
 
 		b.txBeginRelMsg = make(map[uint32]struct{})
-		b.beginMsg = make([]byte, len(raw))
-		copy(b.beginMsg, raw)
+		b.beginMsg = v.Raw
 	case message.Commit:
 		var ln uint64
 		for relOID := range b.txBeginRelMsg {
-			ln, err = b.backupTables[relOID].SaveRawMessage(raw, b.flushLSN)
+			ln, err = b.backupTables[relOID].SaveRawMessage(v.Raw, b.flushLSN)
 			if err != nil {
 				break
 			}
@@ -329,9 +330,7 @@ func (b *LogicalBackup) handler(m message.Message, raw []byte) error {
 		if _, ok := b.types[v.ID]; !ok {
 			b.types[v.ID] = v
 		}
-
-		b.typeMsg = make([]byte, len(raw))
-		copy(b.typeMsg, raw)
+		b.typeMsg = v.Raw
 	}
 
 	return err
@@ -405,7 +404,7 @@ func (b *LogicalBackup) startReplication() error {
 				if err != nil {
 					log.Fatalf("invalid pgoutput message: %s", err)
 				}
-				if err := b.handler(logmsg, repMsg.WalMessage.WalData); err != nil {
+				if err := b.handler(logmsg); err != nil {
 					log.Fatalf("error handling waldata: %s", err)
 				}
 			}
@@ -516,7 +515,7 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 			t,
 			b.connCfg,
 			time.Minute,
-			b.bbQueue,
+			b.basebackupQueue,
 			b.cfg.DeltasPerFile,
 			b.cfg.BackupThreshold,
 			b.cfg.Fsync)
@@ -650,7 +649,7 @@ func (b *LogicalBackup) BackgroundBasebackuper() {
 	defer b.waitGr.Done()
 
 	for {
-		obj, err := b.bbQueue.Get()
+		obj, err := b.basebackupQueue.Get()
 		if err == context.Canceled {
 			return
 		}
@@ -679,9 +678,9 @@ func (b *LogicalBackup) closeOldFiles() {
 	}
 }
 
-func (b *LogicalBackup) queueBbTables() {
+func (b *LogicalBackup) QueueBasebackupTables() {
 	for _, t := range b.backupTables {
-		b.bbQueue.Put(t)
+		b.basebackupQueue.Put(t)
 	}
 }
 
@@ -703,9 +702,4 @@ func (b *LogicalBackup) Run() {
 
 	b.waitGr.Add(1)
 	go b.closeOldFiles()
-
-	if b.cfg.InitialBasebackup {
-		log.Printf("Queueing tables for the initial backup")
-		b.queueBbTables()
-	}
 }

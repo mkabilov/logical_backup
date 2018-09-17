@@ -48,10 +48,10 @@ type TableBackup struct {
 	cfg  pgx.ConnConfig
 
 	// Files
-	tableDir     string
-	deltasDir    string
-	bbFilename   string
-	infoFilename string
+	tableDir           string
+	deltasDir          string
+	basebackupFilename string
+	infoFilename       string
 
 	// Deltas
 	deltaCnt        int
@@ -94,7 +94,7 @@ func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pg
 		cfg:                  connCfg,
 		tableDir:             tableDir,
 		deltasDir:            path.Join(tableDir, "deltas"),
-		bbFilename:           path.Join(tableDir, "basebackup.copy"),
+		basebackupFilename:   path.Join(tableDir, "basebackup.copy"),
 		infoFilename:         path.Join(tableDir, "info.yaml"),
 		periodBetweenBackups: backupPeriod,
 		backupThreshold:      backupThreshold,
@@ -253,6 +253,14 @@ func (t *TableBackup) Basebackup() error {
 		return fmt.Errorf("could not lock table: %v", err)
 	}
 
+	//TODO: check if table is empty before creating logical replication slot
+	if hasRows, err := t.hasRows(); err != nil {
+		return fmt.Errorf("could not check if table has rows: %v", err)
+	} else if !hasRows {
+		log.Printf("table %s seems to have no rows; skipping", t.Identifier)
+		return nil
+	}
+
 	relationInfo, err := FetchRelationInfo(t.tx, t.Identifier)
 	if err != nil {
 		return fmt.Errorf("could not fetch table struct: %v", err)
@@ -299,12 +307,21 @@ func (t *TableBackup) String() string {
 
 func (t *TableBackup) createDirs() error {
 	if _, err := os.Stat(t.deltasDir); os.IsNotExist(err) {
-		if err := os.Mkdir(t.deltasDir, dirPerms); err != nil {
+		if err := os.MkdirAll(t.deltasDir, dirPerms); err != nil {
 			return fmt.Errorf("could not create delta dir: %v", err)
 		}
 	}
 
 	return nil
+}
+
+func (t *TableBackup) hasRows() (bool, error) {
+	var hasRows bool
+	row := t.conn.QueryRow(fmt.Sprintf("select exists(select 1 from %s)", t.Identifier.Sanitize()))
+
+	err := row.Scan(&hasRows)
+
+	return hasRows, err
 }
 
 func (t *TableBackup) Truncate() error {

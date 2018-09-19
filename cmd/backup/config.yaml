@@ -10,6 +10,7 @@ initialBasebackup: true
 fsync: false
 archiveDir: /tmp/backup2
 periodBetweenBackups: 12h
+oldDeltaBackupTrigger: 1d
 db:
     host: 127.0.0.1
     port: 5432

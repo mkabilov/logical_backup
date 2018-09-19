@@ -101,7 +101,8 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 
 	tb.basebackupQueue = basebackupsQueue
 
-	go tb.Archiver()
+	go tb.archiver()
+	go tb.periodicBackup()
 
 	return &tb, nil
 }
@@ -146,7 +147,7 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	return ln, nil
 }
 
-func (t *TableBackup) Archiver() {
+func (t *TableBackup) archiver() {
 	for {
 		select {
 		case file := <-t.archiveFiles:
@@ -204,13 +205,23 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 
 func (t *TableBackup) periodicBackup() {
 	for {
-		ticker := time.NewTicker(t.cfg.PeriodBetweenBackups)
+		periodicBackupTick := time.Tick(t.cfg.PeriodBetweenBackups)
+		heartbeat := time.Tick(time.Minute)
 		select {
 		case <-t.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-periodicBackupTick:
 			log.Printf("queuing backup of %s", t)
-			t.basebackupQueue.Put(t)
+			//t.basebackupQueue.Put(t)
+		case <-heartbeat:
+			if t.lastWrittenMessage.IsZero() {
+				break
+			}
+
+			if time.Since(t.lastWrittenMessage) > t.cfg.OldDeltaBackupTrigger {
+				log.Printf("queuing backup of %s due to old delta message, lastwritten: %v", t, t.lastWrittenMessage)
+				t.basebackupQueue.Put(t)
+			}
 		}
 	}
 }

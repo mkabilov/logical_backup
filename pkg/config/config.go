@@ -24,6 +24,7 @@ type Config struct {
 	Fsync                 bool           `yaml:"fsync"`
 	ArchiveDir            string         `yaml:"archiveDir"`
 	PeriodBetweenBackups  time.Duration  `yaml:"periodBetweenBackups"`
+	OldDeltaBackupTrigger time.Duration  `yaml:"oldDeltaBackupTrigger"`
 }
 
 func New(filename string) (*Config, error) {

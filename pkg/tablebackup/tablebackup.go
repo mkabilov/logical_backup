@@ -56,13 +56,13 @@ type TableBackup struct {
 	infoFilename       string
 
 	// Deltas
-	deltaCnt                 int
-	deltaFilesCnt            int
-	deltaFilesSinceBackupCnt int
-	filenamePostfix          uint32
-	lastLSN                  uint64
-	currentDeltaFp           *os.File
-	currentDeltaFilename     string
+	deltaCnt             int
+	deltaFilesCnt        int
+	deltasSinceBackupCnt int
+	filenamePostfix      uint32
+	lastLSN              uint64
+	currentDeltaFp       *os.File
+	currentDeltaFilename string
 
 	// Basebackup
 	basebackupLSN       uint64
@@ -128,6 +128,7 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	}
 
 	t.deltaCnt++
+	t.deltasSinceBackupCnt++
 
 	ln := uint64(len(msg) + 8)
 
@@ -219,7 +220,6 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 	t.currentDeltaFp = fp
 	t.lastLSN = newLSN
 	t.deltaFilesCnt++
-	t.deltaFilesSinceBackupCnt++
 	t.deltaCnt = 0
 
 	return nil
@@ -243,7 +243,7 @@ func (t *TableBackup) periodicBackup() {
 				break
 			}
 
-			if t.deltaFilesSinceBackupCnt == 0 {
+			if t.deltasSinceBackupCnt == 0 {
 				break
 			}
 

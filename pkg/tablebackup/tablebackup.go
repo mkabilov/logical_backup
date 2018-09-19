@@ -199,8 +199,6 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 		if err := t.currentDeltaFp.Close(); err != nil {
 			return fmt.Errorf("could not close old file: %v", err)
 		}
-
-		t.archiveFiles <- t.currentDeltaFilename //TODO: potential lock
 	}
 
 	deltaFilename := fmt.Sprintf("%016x", newLSN)
@@ -219,6 +217,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 		return err
 	}
 
+	t.archiveFiles <- t.currentDeltaFilename //TODO: potential lock
 	t.currentDeltaFilename = path.Join(deltasDir, deltaFilename)
 	t.currentDeltaFp = fp
 	t.lastLSN = newLSN

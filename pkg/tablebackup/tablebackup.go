@@ -152,19 +152,32 @@ func (t *TableBackup) archiver() {
 	for {
 		select {
 		case file := <-t.archiveFiles:
-			oldPath := path.Join(t.tableDir, file)
-			newPath := path.Join(t.archiveDir, file)
+			sourceFile := path.Join(t.tableDir, file)
+			destFile := path.Join(t.archiveDir, file)
 
-			if _, err := copyFile(oldPath, newPath); err != nil {
-				os.Remove(newPath)
-				log.Printf("could not move %s -> %s file: %v", oldPath, newPath, err)
+			if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
+				log.Printf("source file doesn't exist: %q; skipping", sourceFile)
 				break
 			}
 
-			if err := os.Remove(oldPath); err != nil {
+			if st, err := os.Stat(destFile); os.IsExist(err) {
+				if st.Size() == 0 {
+					os.Remove(destFile)
+				} else {
+					log.Printf("destination file is not empty %q; skipping", destFile)
+				}
+			}
+
+			if _, err := copyFile(sourceFile, destFile); err != nil {
+				os.Remove(destFile)
+				log.Printf("could not move %s -> %s file: %v", sourceFile, destFile, err)
+				break
+			}
+
+			if err := os.Remove(sourceFile); err != nil {
 				log.Printf("could not delete old file: %v", err)
 			} else {
-				log.Printf("file moved: %s -> %s", oldPath, newPath)
+				log.Printf("file moved: %s -> %s", sourceFile, destFile)
 			}
 		case <-t.ctx.Done():
 			return

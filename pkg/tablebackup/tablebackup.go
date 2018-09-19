@@ -237,7 +237,7 @@ func (t *TableBackup) periodicBackup() {
 			log.Printf("queuing backup of %s", t)
 			//t.basebackupQueue.Put(t)
 		case <-heartbeat.C:
-			if t.lastWrittenMessage.IsZero() {
+			if t.lastWrittenMessage.IsZero() || t.cfg.OldDeltaBackupTrigger.Seconds() < 1 {
 				break
 			}
 

@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -154,8 +155,14 @@ func (t *TableBackup) archiver() {
 			oldPath := path.Join(t.tableDir, file)
 			newPath := path.Join(t.archiveDir, file)
 
-			if err := os.Rename(oldPath, newPath); err != nil {
+			if _, err := copyFile(oldPath, newPath); err != nil {
+				os.Remove(newPath)
 				log.Printf("could not move %s -> %s file: %v", oldPath, newPath, err)
+				break
+			}
+
+			if err := os.Remove(oldPath); err != nil {
+				log.Printf("could not delete old file: %v", err)
 			} else {
 				log.Printf("file moved: %s -> %s", oldPath, newPath)
 			}
@@ -361,4 +368,30 @@ ORDER BY
 
 func hash(tbl message.Identifier) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(tbl.Sanitize())))
+}
+
+func copyFile(src, dst string) (int64, error) {
+	sourceFileStat, err := os.Stat(src)
+	if err != nil {
+		return 0, err
+	}
+
+	if !sourceFileStat.Mode().IsRegular() {
+		return 0, fmt.Errorf("%s is not a regular file", src)
+	}
+
+	source, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer destination.Close()
+	nBytes, err := io.Copy(destination, source)
+
+	return nBytes, err
 }

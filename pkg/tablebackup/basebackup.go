@@ -4,12 +4,120 @@ import (
 	"database/sql"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
+	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx"
+	"gopkg.in/yaml.v2"
+
+	"github.com/ikitiki/logical_backup/pkg/message"
 )
+
+func (t *TableBackup) Basebackup() error {
+	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
+		log.Printf("Already locked %s; skipping", t)
+		return nil
+	}
+	defer func() {
+		log.Printf("Finished backup of %s", t)
+		atomic.StoreUint32(&t.locker, 0)
+	}()
+
+	log.Printf("Starting base backup of %s", t)
+	tempFilepath := path.Join(t.tableDir, t.infoFilename+".new")
+	if _, err := os.Stat(tempFilepath); os.IsExist(err) {
+		os.Remove(tempFilepath)
+	}
+
+	infoFp, err := os.OpenFile(tempFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not create info file: %v", err)
+	}
+	defer infoFp.Close()
+	defer func() {
+		if _, err := os.Stat(tempFilepath); os.IsExist(err) {
+			os.Remove(tempFilepath)
+		}
+	}()
+
+	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= t.sleepBetweenBackups {
+		log.Printf("base backups happening too often; skipping")
+		return nil
+	}
+
+	if err := t.connect(); err != nil {
+		return fmt.Errorf("could not connect: %v", err)
+	}
+	defer t.disconnect()
+
+	if err := t.txBegin(); err != nil {
+		return fmt.Errorf("could not start transaction: %v", err)
+	}
+
+	startTime := time.Now()
+
+	if err := t.createTempReplicationSlot(); err != nil { // slot will be dropped on tx finish
+		return fmt.Errorf("could not create replication slot: %v", err)
+	}
+
+	if err := t.lockTable(); err != nil {
+		return fmt.Errorf("could not lock table: %v", err)
+	}
+
+	//TODO: check if table is empty before creating logical replication slot
+	if hasRows, err := t.hasRows(); err != nil {
+		return fmt.Errorf("could not check if table has rows: %v", err)
+	} else if !hasRows {
+		log.Printf("table %s seems to have no rows; skipping", t.Identifier)
+		return nil
+	}
+
+	relationInfo, err := FetchRelationInfo(t.tx, t.Identifier)
+	if err != nil {
+		return fmt.Errorf("could not fetch table struct: %v", err)
+	}
+
+	if err := t.copyDump(); err != nil {
+		return fmt.Errorf("could not dump table: %v", err)
+	}
+
+	if err := t.txCommit(); err != nil {
+		return fmt.Errorf("could not commit: %v", err)
+	}
+
+	t.lastBackupDuration = time.Since(startTime)
+	err = yaml.NewEncoder(infoFp).Encode(message.DumpInfo{
+		StartLSN:       pgx.FormatLSN(t.basebackupLSN),
+		CreateDate:     time.Now(),
+		Relation:       relationInfo,
+		BackupDuration: t.lastBackupDuration.Seconds(),
+	})
+	if err != nil {
+		return fmt.Errorf("could not save info file: %v", err)
+	}
+
+	if err := os.Rename(tempFilepath, path.Join(t.tableDir, t.infoFilename)); err != nil {
+		log.Printf("could not rename: %v", err)
+	}
+
+	t.archiveFiles <- t.infoFilename
+
+	log.Printf("it took %v to base backup for %s table; start lsn: %s ",
+		t.lastBackupDuration, t.String(), pgx.FormatLSN(t.basebackupLSN))
+
+	if err := t.RotateOldDeltas(path.Join(t.tableDir, deltasDir), t.lastLSN); err != nil {
+		return fmt.Errorf("could not archive old deltas: %v", err)
+	}
+
+	t.lastBasebackupTime = time.Now()
+
+	return nil
+}
 
 // connects to the postgresql instance using replication protocol
 func (t *TableBackup) connect() error {
@@ -147,7 +255,8 @@ func (t *TableBackup) copyDump() error {
 	if t.basebackupLSN == 0 {
 		return fmt.Errorf("no consistent point")
 	}
-	tempFilename := fmt.Sprintf("%s.new", t.basebackupFilename)
+
+	tempFilename := path.Join(t.tableDir, t.basebackupFilename+".new")
 	if _, err := os.Stat(tempFilename); os.IsExist(err) {
 		os.Remove(tempFilename)
 	}
@@ -166,9 +275,11 @@ func (t *TableBackup) copyDump() error {
 		os.Remove(tempFilename)
 		return fmt.Errorf("could not copy: %v", err)
 	}
-	if err := os.Rename(tempFilename, t.basebackupFilename); err != nil {
+	if err := os.Rename(tempFilename, path.Join(t.tableDir, t.basebackupFilename)); err != nil {
 		return fmt.Errorf("could not move file: %v", err)
 	}
+
+	t.archiveFiles <- t.basebackupFilename
 
 	return nil
 }

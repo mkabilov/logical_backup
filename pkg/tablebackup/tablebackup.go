@@ -8,12 +8,10 @@ import (
 	"log"
 	"os"
 	"path"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
-	"gopkg.in/yaml.v2"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
@@ -53,7 +51,7 @@ type TableBackup struct {
 
 	// Files
 	tableDir           string
-	deltasDir          string
+	archiveDir         string
 	basebackupFilename string
 	infoFilename       string
 
@@ -84,9 +82,9 @@ type TableBackup struct {
 }
 
 func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
-	// tb, err := tablebackup.New(b.ctx, b.cfg, t, b.connCfg, b.basebackupQueue)
 	tblHash := hash(tbl)
-	tableDir := path.Join(cfg.TempDir, fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name))
+	tableDir := fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name)
+
 	tb := TableBackup{
 		Identifier:           tbl,
 		ctx:                  ctx,
@@ -94,10 +92,10 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 		sleepBetweenBackups:  time.Second * 3,
 		cfg:                  cfg,
 		dbCfg:                dbCfg,
-		tableDir:             tableDir,
-		deltasDir:            path.Join(tableDir, deltasDir),
-		basebackupFilename:   path.Join(tableDir, "basebackup.copy"),
-		infoFilename:         path.Join(tableDir, "info.yaml"),
+		tableDir:             path.Join(cfg.TempDir, tableDir),
+		archiveDir:           path.Join(cfg.ArchiveDir, tableDir),
+		basebackupFilename:   "basebackup.copy",
+		infoFilename:         "info.yaml",
 		periodBetweenBackups: cfg.PeriodBetweenBackups,
 		backupThreshold:      cfg.BackupThreshold,
 		fsync:                cfg.Fsync,
@@ -160,7 +158,14 @@ func (t *TableBackup) Archiver() {
 	for {
 		select {
 		case file := <-t.archiveFiles:
-			log.Printf("%s file to move to archive: %v", t, file)
+			oldPath := path.Join(t.tableDir, file)
+			newPath := path.Join(t.archiveDir, file)
+
+			if err := os.Rename(oldPath, newPath); err != nil {
+				log.Printf("could not move %s -> %s file: %v", oldPath, newPath, err)
+			} else {
+				log.Printf("file moved: %s -> %s", oldPath, newPath)
+			}
 		case <-t.ctx.Done():
 			return
 		}
@@ -181,7 +186,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 	}
 
 	deltaFilename := fmt.Sprintf("%016x", newLSN)
-	filename := path.Join(t.deltasDir, deltaFilename)
+	filename := path.Join(t.tableDir, deltasDir, deltaFilename)
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
 		t.filenamePostfix++
 	} else {
@@ -218,123 +223,36 @@ func (t *TableBackup) periodicBackup() {
 	}
 }
 
-func (t *TableBackup) Basebackup() error {
-	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
-		log.Printf("Already locked %s; skipping", t)
-		return nil
-	}
-	defer func() {
-		log.Printf("Finished backup of %s", t)
-		atomic.StoreUint32(&t.locker, 0)
-	}()
-
-	log.Printf("Starting base backup of %s", t)
-	tempFilename := fmt.Sprintf("%s.new", t.infoFilename)
-	if _, err := os.Stat(tempFilename); os.IsExist(err) {
-		os.Remove(tempFilename)
-	}
-
-	infoFp, err := os.OpenFile(tempFilename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("could not create info file: %v", err)
-	}
-	defer infoFp.Close()
-	defer func() {
-		if _, err := os.Stat(tempFilename); os.IsExist(err) {
-			os.Remove(tempFilename)
-		}
-	}()
-
-	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= t.sleepBetweenBackups {
-		log.Printf("base backups happening too often; skipping")
-		return nil
-	}
-
-	if err := t.connect(); err != nil {
-		return fmt.Errorf("could not connect: %v", err)
-	}
-	defer t.disconnect()
-
-	if err := t.txBegin(); err != nil {
-		return fmt.Errorf("could not start transaction: %v", err)
-	}
-
-	startTime := time.Now()
-
-	if err := t.createTempReplicationSlot(); err != nil { // slot will be dropped on tx finish
-		return fmt.Errorf("could not create replication slot: %v", err)
-	}
-
-	if err := t.lockTable(); err != nil {
-		return fmt.Errorf("could not lock table: %v", err)
-	}
-
-	//TODO: check if table is empty before creating logical replication slot
-	if hasRows, err := t.hasRows(); err != nil {
-		return fmt.Errorf("could not check if table has rows: %v", err)
-	} else if !hasRows {
-		log.Printf("table %s seems to have no rows; skipping", t.Identifier)
-		return nil
-	}
-
-	relationInfo, err := FetchRelationInfo(t.tx, t.Identifier)
-	if err != nil {
-		return fmt.Errorf("could not fetch table struct: %v", err)
-	}
-
-	if err := t.copyDump(); err != nil {
-		return fmt.Errorf("could not dump table: %v", err)
-	}
-
-	if err := t.txCommit(); err != nil {
-		return fmt.Errorf("could not commit: %v", err)
-	}
-
-	t.lastBackupDuration = time.Since(startTime)
-	err = yaml.NewEncoder(infoFp).Encode(message.DumpInfo{
-		StartLSN:       pgx.FormatLSN(t.basebackupLSN),
-		CreateDate:     time.Now(),
-		Relation:       relationInfo,
-		BackupDuration: t.lastBackupDuration.Seconds(),
-	})
-	if err != nil {
-		return fmt.Errorf("could not save info file: %v", err)
-	}
-
-	if err := os.Rename(tempFilename, t.infoFilename); err != nil {
-		log.Printf("could not rename: %v", err)
-	}
-
-	log.Printf("it took %v to base backup for %s table; start lsn: %s ",
-		t.lastBackupDuration, t.String(), pgx.FormatLSN(t.basebackupLSN))
-
-	if err := t.RotateOldDeltas(t.deltasDir, t.lastLSN); err != nil {
-		return fmt.Errorf("could not archive old deltas: %v", err)
-	}
-
-	t.lastBasebackupTime = time.Now()
-
-	return nil
-}
-
 func (t *TableBackup) String() string {
 	return t.Identifier.String()
 }
 
 func (t *TableBackup) createDirs() error {
-	if _, err := os.Stat(t.deltasDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(t.deltasDir, dirPerms); err != nil {
+	deltasPath := path.Join(t.tableDir, deltasDir)
+	archiveDeltasPath := path.Join(t.archiveDir, deltasDir)
+
+	if _, err := os.Stat(deltasPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(deltasPath, dirPerms); err != nil {
 			return fmt.Errorf("could not create delta dir: %v", err)
 		}
 	}
+
+	if _, err := os.Stat(archiveDeltasPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(archiveDeltasPath, dirPerms); err != nil {
+			return fmt.Errorf("could not create archive delta dir: %v", err)
+		}
+	}
+
+	log.Printf("%s: deltasPath: %s", t, deltasPath)
+	log.Printf("%s: archiveDeltasPath: %s", t, archiveDeltasPath)
 
 	return nil
 }
 
 func (t *TableBackup) hasRows() (bool, error) {
 	var hasRows bool
-	row := t.conn.QueryRow(fmt.Sprintf("select exists(select 1 from %s)", t.Identifier.Sanitize()))
 
+	row := t.conn.QueryRow(fmt.Sprintf("select exists(select 1 from %s)", t.Identifier.Sanitize()))
 	err := row.Scan(&hasRows)
 
 	return hasRows, err

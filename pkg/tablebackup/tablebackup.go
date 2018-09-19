@@ -172,8 +172,6 @@ func (t *TableBackup) archiver() {
 
 			if err := os.Remove(sourceFile); err != nil {
 				log.Printf("could not delete old file: %v", err)
-			} else {
-				log.Printf("file moved: %s -> %s", sourceFile, destFile)
 			}
 		case <-t.ctx.Done():
 			return

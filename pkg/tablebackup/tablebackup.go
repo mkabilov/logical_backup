@@ -110,13 +110,7 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 }
 
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
-	if t.currentDeltaFp == nil {
-		if err := t.rotateFile(lsn); err != nil {
-			return 0, fmt.Errorf("could not create file: %v", err)
-		}
-	}
-
-	if t.deltaCnt >= t.cfg.DeltasPerFile {
+	if t.deltaCnt >= t.cfg.DeltasPerFile || t.currentDeltaFp == nil {
 		if err := t.rotateFile(lsn); err != nil {
 			return 0, fmt.Errorf("could not rotate file: %v", err)
 		}
@@ -200,8 +194,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 		t.archiveFiles <- t.currentDeltaFilename //TODO: potential lock
 	}
 
-	deltaFilename := fmt.Sprintf("%016x", newLSN)
-	filename := path.Join(t.tableDir, deltasDir, deltaFilename)
+	filename := path.Join(deltasDir, fmt.Sprintf("%016x", newLSN))
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
 		t.filenamePostfix++
 	} else {
@@ -211,13 +204,14 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 	if t.filenamePostfix > 0 {
 		filename = fmt.Sprintf("%s.%x", filename, t.filenamePostfix)
 	}
-	fp, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+
+	fp, err := os.OpenFile(path.Join(t.tableDir, filename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return err
 	}
-
-	t.currentDeltaFilename = path.Join(deltasDir, deltaFilename)
 	t.currentDeltaFp = fp
+
+	t.currentDeltaFilename = filename
 	t.lastLSN = newLSN
 	t.deltaFilesCnt++
 	t.deltaCnt = 0

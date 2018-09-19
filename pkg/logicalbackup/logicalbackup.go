@@ -380,7 +380,8 @@ func (b *LogicalBackup) startReplication() error {
 	for {
 		select {
 		case <-b.ctx.Done():
-			log.Fatalf("context error: %v", b.ctx.Err())
+			ticker.Stop()
+			return nil
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
 				log.Fatalf("could not send status: %v", err)
@@ -678,6 +679,7 @@ func (b *LogicalBackup) closeOldFiles() {
 	for {
 		select {
 		case <-b.ctx.Done():
+			ticker.Stop()
 			return
 		case <-ticker.C:
 			for _, t := range b.backupTables {

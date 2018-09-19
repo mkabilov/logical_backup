@@ -204,16 +204,19 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 }
 
 func (t *TableBackup) periodicBackup() {
+	periodicBackup := time.NewTicker(t.cfg.PeriodBetweenBackups)
+	heartbeat := time.NewTicker(time.Minute)
+
 	for {
-		periodicBackupTick := time.Tick(t.cfg.PeriodBetweenBackups)
-		heartbeat := time.Tick(time.Minute)
 		select {
 		case <-t.ctx.Done():
+			periodicBackup.Stop()
+			heartbeat.Stop()
 			return
-		case <-periodicBackupTick:
+		case <-periodicBackup.C:
 			log.Printf("queuing backup of %s", t)
 			//t.basebackupQueue.Put(t)
-		case <-heartbeat:
+		case <-heartbeat.C:
 			if t.lastWrittenMessage.IsZero() {
 				break
 			}

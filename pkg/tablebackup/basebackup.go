@@ -115,6 +115,7 @@ func (t *TableBackup) Basebackup() error {
 	}
 
 	t.lastBasebackupTime = time.Now()
+	t.deltaFilesSinceBackupCnt = 0
 
 	return nil
 }

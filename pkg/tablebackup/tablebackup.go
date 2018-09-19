@@ -192,6 +192,10 @@ func (t *TableBackup) Files() int {
 
 func (t *TableBackup) rotateFile(newLSN uint64) error {
 	if t.currentDeltaFp != nil {
+		if err := t.currentDeltaFp.Sync(); err != nil {
+			log.Printf("could not sync: %v", err)
+		}
+
 		if err := t.currentDeltaFp.Close(); err != nil {
 			return fmt.Errorf("could not close old file: %v", err)
 		}

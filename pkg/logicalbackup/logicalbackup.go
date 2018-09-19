@@ -111,7 +111,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
-		stateFilename:          path.Join(cfg.TempDir, "state.yaml"),
+		stateFilename:          "state.yaml",
 		cfg:                    cfg,
 		msgCnt:                 make(map[cmdType]int),
 		srv: http.Server{
@@ -553,11 +553,12 @@ func (b *LogicalBackup) readRestartLSN() (uint64, error) {
 		LSNstr string
 	)
 
-	if _, err := os.Stat(b.stateFilename); os.IsNotExist(err) {
+	stateFilename := path.Join(b.cfg.TempDir, b.stateFilename)
+	if _, err := os.Stat(stateFilename); os.IsNotExist(err) {
 		return 0, nil
 	}
 
-	fp, err := os.OpenFile(b.stateFilename, os.O_RDONLY, os.ModePerm)
+	fp, err := os.OpenFile(stateFilename, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return 0, fmt.Errorf("could not create current lsn file: %v", err)
 	}
@@ -577,11 +578,19 @@ func (b *LogicalBackup) readRestartLSN() (uint64, error) {
 }
 
 func (b *LogicalBackup) storeRestartLSN() error {
-	fp, err := os.OpenFile(b.stateFilename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	//TODO: I'm ugly, refactor me
+
+	fp, err := os.OpenFile(path.Join(b.cfg.TempDir, b.stateFilename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("could not create current lsn file: %v", err)
 	}
 	defer fp.Close()
+
+	fpArchive, err := os.OpenFile(path.Join(b.cfg.ArchiveDir, b.stateFilename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not create archive lsn file: %v", err)
+	}
+	defer fpArchive.Close()
 
 	err = yaml.NewEncoder(fp).Encode(struct {
 		Timestamp  time.Time
@@ -591,6 +600,15 @@ func (b *LogicalBackup) storeRestartLSN() error {
 		return fmt.Errorf("could not save current lsn: %v", err)
 	}
 	fp.Sync()
+
+	err = yaml.NewEncoder(fpArchive).Encode(struct {
+		Timestamp  time.Time
+		CurrentLSN string
+	}{time.Now(), pgx.FormatLSN(b.flushLSN)})
+	if err != nil {
+		return fmt.Errorf("could not save current lsn: %v", err)
+	}
+	fpArchive.Sync()
 
 	return nil
 }

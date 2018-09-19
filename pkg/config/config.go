@@ -3,13 +3,14 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
 )
 
 type Config struct {
-	Dir                   string         `yaml:"dir"`
+	TempDir               string         `yaml:"tempDir"`
 	Tables                []string       `yaml:"tables"`
 	DB                    pgx.ConnConfig `yaml:"db"`
 	Slotname              string         `yaml:"slotname"`
@@ -21,6 +22,8 @@ type Config struct {
 	InitialBasebackup     bool           `yaml:"initialBasebackup"`
 	SendStatusOnCommit    bool           `yaml:"sendStatusOnCommit"`
 	Fsync                 bool           `yaml:"fsync"`
+	ArchiveDir            string         `yaml:"archiveDir"`
+	PeriodBetweenBackups  time.Duration  `yaml:"periodBetweenBackups"`
 }
 
 func New(filename string) (*Config, error) {

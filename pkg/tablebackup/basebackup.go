@@ -13,7 +13,7 @@ import (
 
 // connects to the postgresql instance using replication protocol
 func (t *TableBackup) connect() error {
-	cfg := t.cfg.Merge(pgx.ConnConfig{
+	cfg := t.dbCfg.Merge(pgx.ConnConfig{
 		RuntimeParams:        map[string]string{"replication": "database"},
 		PreferSimpleProtocol: true,
 	})

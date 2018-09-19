@@ -25,7 +25,7 @@ func main() {
 		log.Fatalf("could not init config: %v", err)
 	}
 
-	log.Printf("Backup directory: %q", cfg.Dir)
+	log.Printf("Backup directory: %q", cfg.TempDir)
 	log.Printf("DB connection string: %s@%s:%d/%s slot:%q publication:%q",
 		cfg.DB.User, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database,
 		cfg.Slotname, cfg.PublicationName)

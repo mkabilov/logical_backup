@@ -15,13 +15,16 @@ import (
 	"github.com/jackc/pgx/pgtype"
 	"gopkg.in/yaml.v2"
 
+	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 )
 
 const (
-	dirPerms = os.ModePerm
+	dirPerms       = os.ModePerm
+	archiverBuffer = 100
+	deltasDir      = "deltas"
 )
 
 type TableBackuper interface {
@@ -43,9 +46,10 @@ type TableBackup struct {
 	oid uint32
 
 	// Basebackup
-	tx   *pgx.Tx
-	conn *pgx.Conn
-	cfg  pgx.ConnConfig
+	tx    *pgx.Tx
+	conn  *pgx.Conn
+	cfg   *config.Config
+	dbCfg pgx.ConnConfig
 
 	// Files
 	tableDir           string
@@ -54,13 +58,14 @@ type TableBackup struct {
 	infoFilename       string
 
 	// Deltas
-	deltaCnt        int
-	deltaFilesCnt   int
-	filenamePostfix uint32
-	lastLSN         uint64
-	currentDeltaFp  *os.File
-	deltasPerFile   int
-	backupThreshold int
+	deltaCnt             int
+	deltaFilesCnt        int
+	filenamePostfix      uint32
+	lastLSN              uint64
+	currentDeltaFp       *os.File
+	currentDeltaFilename string
+	deltasPerFile        int
+	backupThreshold      int
 
 	// Basebackup
 	basebackupLSN        uint64
@@ -72,49 +77,46 @@ type TableBackup struct {
 
 	locker uint32
 
-	bbQueue *queue.Queue
-	msgLen  []byte
+	basebackupQueue *queue.Queue
+	msgLen          []byte
+
+	archiveFiles chan string // path relative to table dir
 }
 
-func New(ctx context.Context, baseDir string, tbl message.Identifier, connCfg pgx.ConnConfig,
-	backupPeriod time.Duration, bbQueue *queue.Queue, deltasPerFile, backupThreshold int, fsync bool) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
-	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
-		if err := os.Mkdir(baseDir, dirPerms); err != nil {
-			return nil, fmt.Errorf("could not create base dir: %v", err)
-		}
-	}
-
+func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
+	// tb, err := tablebackup.New(b.ctx, b.cfg, t, b.connCfg, b.basebackupQueue)
 	tblHash := hash(tbl)
-	tableDir := path.Join(baseDir, fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name))
+	tableDir := path.Join(cfg.TempDir, fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name))
 	tb := TableBackup{
 		Identifier:           tbl,
 		ctx:                  ctx,
-		deltasPerFile:        deltasPerFile,
+		deltasPerFile:        cfg.DeltasPerFile,
 		sleepBetweenBackups:  time.Second * 3,
-		cfg:                  connCfg,
+		cfg:                  cfg,
+		dbCfg:                dbCfg,
 		tableDir:             tableDir,
-		deltasDir:            path.Join(tableDir, "deltas"),
+		deltasDir:            path.Join(tableDir, deltasDir),
 		basebackupFilename:   path.Join(tableDir, "basebackup.copy"),
 		infoFilename:         path.Join(tableDir, "info.yaml"),
-		periodBetweenBackups: backupPeriod,
-		backupThreshold:      backupThreshold,
-		fsync:                fsync,
+		periodBetweenBackups: cfg.PeriodBetweenBackups,
+		backupThreshold:      cfg.BackupThreshold,
+		fsync:                cfg.Fsync,
 		msgLen:               make([]byte, 8),
+		archiveFiles:         make(chan string, archiverBuffer),
 	}
 
 	if err := tb.createDirs(); err != nil {
 		return nil, fmt.Errorf("could not create dirs: %v", err)
 	}
 
-	tb.bbQueue = bbQueue
+	tb.basebackupQueue = basebackupsQueue
 
-	//go tb.periodicBackup()
+	go tb.Archiver()
 
 	return &tb, nil
 }
 
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
-	// init
 	if t.currentDeltaFp == nil {
 		if err := t.rotateFile(lsn); err != nil {
 			return 0, fmt.Errorf("could not create file: %v", err)
@@ -129,7 +131,7 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 
 	if t.deltaFilesCnt%t.backupThreshold == 0 && t.deltaCnt == 0 {
 		log.Printf("queueing base backup because we reached backupDeltaThreshold %s", t)
-		t.bbQueue.Put(t)
+		t.basebackupQueue.Put(t)
 	}
 
 	t.deltaCnt++
@@ -154,6 +156,15 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	return ln, nil
 }
 
+func (t *TableBackup) Archiver() {
+	select {
+	case file := <-t.archiveFiles:
+		log.Printf("file to move to archive: %v", file)
+	case <-t.ctx.Done():
+		return
+	}
+}
+
 func (t *TableBackup) Files() int {
 	return t.deltaFilesCnt
 }
@@ -163,9 +174,12 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 		if err := t.currentDeltaFp.Close(); err != nil {
 			return fmt.Errorf("could not close old file: %v", err)
 		}
+
+		t.archiveFiles <- t.currentDeltaFilename //TODO: potential lock
 	}
 
-	filename := fmt.Sprintf("%s/%016x", t.deltasDir, newLSN)
+	deltaFilename := fmt.Sprintf("%016x", newLSN)
+	filename := path.Join(t.deltasDir, deltaFilename)
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
 		t.filenamePostfix++
 	} else {
@@ -180,6 +194,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 		return err
 	}
 
+	t.currentDeltaFilename = path.Join(deltasDir, deltaFilename)
 	t.currentDeltaFp = fp
 	t.lastLSN = newLSN
 	t.deltaFilesCnt++
@@ -196,10 +211,9 @@ func (t *TableBackup) periodicBackup() {
 			return
 		case <-ticker.C:
 			log.Printf("queuing backup of %s", t)
-			t.bbQueue.Put(t)
+			t.basebackupQueue.Put(t)
 		}
 	}
-
 }
 
 func (t *TableBackup) Basebackup() error {

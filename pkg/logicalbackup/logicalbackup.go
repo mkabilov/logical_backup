@@ -32,7 +32,6 @@ const (
 
 	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
-	backupsPeriod = time.Minute * 10
 
 	cInsert cmdType = iota
 	cUpdate
@@ -70,7 +69,6 @@ type LogicalBackup struct {
 	lastTxId       int32
 
 	basebackupQueue *queue.Queue
-	bbInterval      time.Duration
 	waitGr          *sync.WaitGroup
 
 	msgCnt       map[cmdType]int
@@ -113,14 +111,19 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
-		stateFilename:          path.Join(cfg.Dir, "state.yaml"),
-		bbInterval:             backupsPeriod,
+		stateFilename:          path.Join(cfg.TempDir, "state.yaml"),
 		cfg:                    cfg,
 		msgCnt:                 make(map[cmdType]int),
 		srv: http.Server{
 			Addr:    fmt.Sprintf(":%d", 8080),                    // TODO: get rid of the hardcoded value
 			Handler: http.TimeoutHandler(mux, time.Second*5, ""), // TODO: get rid of the hardcoded value
 		},
+	}
+
+	if _, err := os.Stat(cfg.TempDir); os.IsNotExist(err) {
+		if err := os.Mkdir(cfg.TempDir, os.ModePerm); err != nil {
+			return nil, fmt.Errorf("could not create base dir: %v", err)
+		}
 	}
 
 	conn, err := pgx.Connect(pgxConn)
@@ -132,7 +135,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	log.Printf("My PID: %d", conn.PID())
 
 	//TODO: have a separate "init" command which will set replica identity and create replication slots/publications
-	if err := lb.checkPgParams(conn); err != nil {
+	if err := lb.checkTablesReplicaIdentities(conn); err != nil {
 		return nil, err
 	}
 
@@ -191,7 +194,6 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	}
 
 	if len(cfg.Tables) > 0 {
-		//TODO: if list of tables provided, backup only them
 		log.Printf("Tables to backup: %s", strings.Join(cfg.Tables, ", "))
 	} else {
 		log.Printf("Backing up all the publication tables")
@@ -256,8 +258,8 @@ func (b *LogicalBackup) handler(m message.Message) error {
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
 					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
-						tb, tErr := tablebackup.New(b.ctx, b.cfg.Dir, tblName, b.connCfg, time.Minute,
-							b.basebackupQueue, b.cfg.DeltasPerFile, b.cfg.BackupThreshold, b.cfg.Fsync)
+
+						tb, tErr := tablebackup.New(b.ctx, b.cfg, tblName, b.connCfg, b.basebackupQueue)
 						if tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
@@ -510,16 +512,7 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 			return fmt.Errorf("could not scan: %v", err)
 		}
 
-		tb, err := tablebackup.New(b.ctx,
-			b.cfg.Dir,
-			t,
-			b.connCfg,
-			time.Minute,
-			b.basebackupQueue,
-			b.cfg.DeltasPerFile,
-			b.cfg.BackupThreshold,
-			b.cfg.Fsync)
-
+		tb, err := tablebackup.New(b.ctx, b.cfg, t, b.connCfg, b.basebackupQueue)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
@@ -602,7 +595,7 @@ func (b *LogicalBackup) storeRestartLSN() error {
 	return nil
 }
 
-func (b *LogicalBackup) checkPgParams(conn *pgx.Conn) error {
+func (b *LogicalBackup) checkTablesReplicaIdentities(conn *pgx.Conn) error {
 	tables := make([]string, 0)
 
 	rows, err := conn.Query(`select quote_ident(t.nspname) || '.' || quote_ident(t.relname)

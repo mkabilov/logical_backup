@@ -36,7 +36,6 @@ type TableBackuper interface {
 
 type TableBackup struct {
 	message.Identifier
-	fsync bool
 
 	ctx context.Context
 
@@ -62,16 +61,13 @@ type TableBackup struct {
 	lastLSN              uint64
 	currentDeltaFp       *os.File
 	currentDeltaFilename string
-	deltasPerFile        int
-	backupThreshold      int
 
 	// Basebackup
-	basebackupLSN        uint64
-	lastBasebackupTime   time.Time
-	sleepBetweenBackups  time.Duration
-	periodBetweenBackups time.Duration
-	lastBackupDuration   time.Duration
-	lastWrittenMessage   time.Time
+	basebackupLSN       uint64
+	lastBasebackupTime  time.Time
+	sleepBetweenBackups time.Duration
+	lastBackupDuration  time.Duration
+	lastWrittenMessage  time.Time
 
 	locker uint32
 
@@ -86,21 +82,17 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 	tableDir := fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name)
 
 	tb := TableBackup{
-		Identifier:           tbl,
-		ctx:                  ctx,
-		deltasPerFile:        cfg.DeltasPerFile,
-		sleepBetweenBackups:  time.Second * 3,
-		cfg:                  cfg,
-		dbCfg:                dbCfg,
-		tableDir:             path.Join(cfg.TempDir, tableDir),
-		archiveDir:           path.Join(cfg.ArchiveDir, tableDir),
-		basebackupFilename:   "basebackup.copy",
-		infoFilename:         "info.yaml",
-		periodBetweenBackups: cfg.PeriodBetweenBackups,
-		backupThreshold:      cfg.BackupThreshold,
-		fsync:                cfg.Fsync,
-		msgLen:               make([]byte, 8),
-		archiveFiles:         make(chan string, archiverBuffer),
+		Identifier:          tbl,
+		ctx:                 ctx,
+		sleepBetweenBackups: time.Second * 3,
+		cfg:                 cfg,
+		dbCfg:               dbCfg,
+		tableDir:            path.Join(cfg.TempDir, tableDir),
+		archiveDir:          path.Join(cfg.ArchiveDir, tableDir),
+		basebackupFilename:  "basebackup.copy",
+		infoFilename:        "info.yaml",
+		msgLen:              make([]byte, 8),
+		archiveFiles:        make(chan string, archiverBuffer),
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -121,13 +113,13 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 		}
 	}
 
-	if t.deltaCnt >= t.deltasPerFile {
+	if t.deltaCnt >= t.cfg.DeltasPerFile {
 		if err := t.rotateFile(lsn); err != nil {
 			return 0, fmt.Errorf("could not rotate file: %v", err)
 		}
 	}
 
-	if t.deltaFilesCnt%t.backupThreshold == 0 && t.deltaCnt == 0 {
+	if t.deltaFilesCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 {
 		log.Printf("queueing base backup because we reached backupDeltaThreshold %s", t)
 		t.basebackupQueue.Put(t)
 	}
@@ -143,7 +135,7 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 		return 0, fmt.Errorf("could not save delta: %v", err)
 	}
 
-	if t.fsync {
+	if t.cfg.Fsync {
 		if err := t.currentDeltaFp.Sync(); err != nil {
 			return 0, fmt.Errorf("could not fsync: %v", err)
 		}
@@ -212,7 +204,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 
 func (t *TableBackup) periodicBackup() {
 	for {
-		ticker := time.NewTicker(t.periodBetweenBackups)
+		ticker := time.NewTicker(t.cfg.PeriodBetweenBackups)
 		select {
 		case <-t.ctx.Done():
 			return

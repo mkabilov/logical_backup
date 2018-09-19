@@ -157,11 +157,13 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 }
 
 func (t *TableBackup) Archiver() {
-	select {
-	case file := <-t.archiveFiles:
-		log.Printf("file to move to archive: %v", file)
-	case <-t.ctx.Done():
-		return
+	for {
+		select {
+		case file := <-t.archiveFiles:
+			log.Printf("%s file to move to archive: %v", t, file)
+		case <-t.ctx.Done():
+			return
+		}
 	}
 }
 

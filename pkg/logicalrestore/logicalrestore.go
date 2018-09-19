@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"reflect"
 	"sort"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
+	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 type deltas []string
@@ -66,8 +68,7 @@ type LogicalRestorer interface {
 }
 
 type LogicalRestore struct {
-	schemaName string
-	tableName  string
+	message.Identifier
 
 	startLSN    uint64
 	columnNames []string
@@ -86,8 +87,7 @@ func New(schemaName, tableName, dir string, cfg pgx.ConnConfig) *LogicalRestore 
 		ctx:        context.Background(),
 		baseDir:    dir,
 		cfg:        cfg,
-		schemaName: schemaName,
-		tableName:  tableName,
+		Identifier: message.Identifier{Namespace: schemaName, Name: tableName},
 	}
 }
 
@@ -151,15 +151,15 @@ func (r *LogicalRestore) rollback() error {
 }
 
 func (r *LogicalRestore) infoFilepath() string {
-	return fmt.Sprintf("%s/%s.%s/info.yaml", r.baseDir, r.schemaName, r.tableName)
+	return path.Join(r.baseDir, utils.TableDir(r.Identifier), "info.yaml")
 }
 
 func (r *LogicalRestore) dumpFilepath() string {
-	return fmt.Sprintf("%s/%s.%s/basebackup.copy", r.baseDir, r.schemaName, r.tableName)
+	return path.Join(r.baseDir, utils.TableDir(r.Identifier), "basebackup.copy")
 }
 
 func (r *LogicalRestore) deltaDir() string {
-	return fmt.Sprintf("%s/%s.%s/deltas", r.baseDir, r.schemaName, r.tableName)
+	return path.Join(r.baseDir, utils.TableDir(r.Identifier), "deltas")
 }
 
 func (r *LogicalRestore) loadInfo() error {
@@ -196,9 +196,7 @@ func (r *LogicalRestore) loadDump() error {
 	}
 	defer fp.Close()
 
-	table := pgx.Identifier{r.schemaName, r.tableName}
-
-	if err := r.conn.CopyFromReader(fp, fmt.Sprintf("copy %s from stdin", table.Sanitize())); err != nil {
+	if err := r.conn.CopyFromReader(fp, fmt.Sprintf("copy %s from stdin", r.Identifier.Sanitize())); err != nil {
 		return fmt.Errorf("could not copy: %v", err)
 	}
 
@@ -207,6 +205,7 @@ func (r *LogicalRestore) loadDump() error {
 
 func (r *LogicalRestore) applyDelta(filePath string) error {
 	log.Printf("reading %q delta file", filePath)
+
 	fp, err := os.OpenFile(filePath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("could not open file: %v", err)
@@ -244,20 +243,20 @@ func (r *LogicalRestore) applyDelta(filePath string) error {
 }
 
 func (r *LogicalRestore) applyDeltas() error {
-	dlts := make(deltas, 0)
+	deltaFiles := make(deltas, 0)
 	fileList, err := ioutil.ReadDir(r.deltaDir())
 	if err != nil {
 		return fmt.Errorf("could not read directory: %v", err)
 	}
 	for _, v := range fileList {
-		dlts = append(dlts, v.Name())
+		deltaFiles = append(deltaFiles, v.Name())
 	}
 
-	sort.Sort(dlts)
+	sort.Sort(deltaFiles)
 
-	for _, delta := range dlts {
-		if err := r.applyDelta(fmt.Sprintf("%s/%s", r.deltaDir(), delta)); err != nil {
-			return fmt.Errorf("could not apply %q delta file: %v", delta, err)
+	for _, deltaFile := range deltaFiles {
+		if err := r.applyDelta(path.Join(r.deltaDir(), deltaFile)); err != nil {
+			return fmt.Errorf("could not apply %q delta file: %v", deltaFile, err)
 		}
 	}
 
@@ -265,15 +264,13 @@ func (r *LogicalRestore) applyDeltas() error {
 }
 
 func (r *LogicalRestore) checkTableStruct() error {
-	relationInfo, err := tablebackup.FetchRelationInfo(
-		r.tx,
-		message.Identifier{r.schemaName, r.tableName})
+	relationInfo, err := tablebackup.FetchRelationInfo(r.tx, r.Identifier)
 	if err != nil {
 		return fmt.Errorf("could not fetch table info: %v", err)
 	}
 
-	if !reflect.DeepEqual(relationInfo, r.relInfo) {
-		return fmt.Errorf("table structs do not match")
+	if !reflect.DeepEqual(relationInfo.Columns, r.relInfo.Columns) {
+		return fmt.Errorf("table structs do not match: \n%#v\n%#v", relationInfo.Columns, r.relInfo.Columns)
 	}
 
 	return nil

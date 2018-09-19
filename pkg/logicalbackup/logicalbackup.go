@@ -52,7 +52,7 @@ type LogicalBackup struct {
 
 	backupTables map[uint32]tablebackup.TableBackuper
 
-	connCfg  pgx.ConnConfig
+	dbCfg    pgx.ConnConfig
 	replConn *pgx.ReplicationConn // connection for logical replication
 	tx       *pgx.Tx
 
@@ -100,8 +100,8 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:                    ctx,
-		connCfg:                pgxConn,
+		ctx:   ctx,
+		dbCfg: pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		relations:              make(map[message.Identifier]message.Relation),
@@ -259,7 +259,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
 
-						tb, tErr := tablebackup.New(b.ctx, b.cfg, tblName, b.connCfg, b.basebackupQueue)
+						tb, tErr := tablebackup.New(b.ctx, b.cfg, tblName, b.dbCfg, b.basebackupQueue)
 						if tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
@@ -443,7 +443,7 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 			return false, fmt.Errorf("slot %q is not a logical slot", b.cfg.Slotname)
 		}
 
-		if database != b.connCfg.Database {
+		if database != b.dbCfg.Database {
 			return false, fmt.Errorf("replication slot %q belongs to %q database", b.cfg.Slotname, database)
 		}
 
@@ -513,7 +513,7 @@ func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
 			return fmt.Errorf("could not scan: %v", err)
 		}
 
-		tb, err := tablebackup.New(b.ctx, b.cfg, t, b.connCfg, b.basebackupQueue)
+		tb, err := tablebackup.New(b.ctx, b.cfg, t, b.dbCfg, b.basebackupQueue)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}

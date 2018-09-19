@@ -2,7 +2,6 @@ package tablebackup
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -18,6 +17,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
+	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 const (
@@ -80,8 +80,7 @@ type TableBackup struct {
 }
 
 func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
-	tblHash := hash(tbl)
-	tableDir := fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name)
+	tableDir := utils.TableDir(tbl)
 
 	tb := TableBackup{
 		Identifier:          tbl,
@@ -372,10 +371,6 @@ ORDER BY
 	rel.OID = relOid
 
 	return rel, nil
-}
-
-func hash(tbl message.Identifier) string {
-	return fmt.Sprintf("%x", md5.Sum([]byte(tbl.Sanitize())))
 }
 
 func copyFile(src, dst string) (int64, error) {

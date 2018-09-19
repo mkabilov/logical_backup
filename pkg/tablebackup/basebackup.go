@@ -24,7 +24,6 @@ func (t *TableBackup) Basebackup() error {
 		return nil
 	}
 	defer func() {
-		log.Printf("Finished backup of %s", t)
 		atomic.StoreUint32(&t.locker, 0)
 	}()
 
@@ -38,11 +37,10 @@ func (t *TableBackup) Basebackup() error {
 	if err != nil {
 		return fmt.Errorf("could not create info file: %v", err)
 	}
-	defer infoFp.Close()
+
 	defer func() {
-		if _, err := os.Stat(tempFilepath); os.IsExist(err) {
-			os.Remove(tempFilepath)
-		}
+		infoFp.Close()
+		os.Remove(tempFilepath)
 	}()
 
 	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= t.sleepBetweenBackups {
@@ -107,8 +105,8 @@ func (t *TableBackup) Basebackup() error {
 
 	t.archiveFiles <- t.infoFilename
 
-	log.Printf("it took %v to base backup for %s table; start lsn: %s ",
-		t.lastBackupDuration, t.String(), pgx.FormatLSN(t.basebackupLSN))
+	log.Printf("%s backed up in %v; start lsn: %s",
+		t.String(), t.lastBackupDuration, pgx.FormatLSN(t.basebackupLSN))
 
 	if err := t.RotateOldDeltas(path.Join(t.tableDir, deltasDir), t.lastLSN); err != nil {
 		return fmt.Errorf("could not archive old deltas: %v", err)

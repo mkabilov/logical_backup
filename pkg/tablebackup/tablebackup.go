@@ -269,9 +269,6 @@ func (t *TableBackup) createDirs() error {
 		}
 	}
 
-	log.Printf("%s: deltasPath: %s", t, deltasPath)
-	log.Printf("%s: archiveDeltasPath: %s", t, archiveDeltasPath)
-
 	return nil
 }
 

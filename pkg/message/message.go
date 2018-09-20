@@ -19,8 +19,6 @@ const (
 	NullValue    TupleKind = 'n' // null
 	ToastedValue           = 'u' // unchanged column
 	TextValue              = 't' // text formatted value
-
-	DeltaMessageFormat = "%016x %08x %q" //LSN-TXID-"SQL"
 )
 
 var replicaIdentities = map[ReplicaIdentity]string{
@@ -188,7 +186,7 @@ func (ins Insert) SQL(rel Relation) string {
 	}
 
 	return fmt.Sprintf("insert into %s (%s) values (%s);",
-		pgx.Identifier{rel.Namespace, rel.Name}.Sanitize(),
+		rel.Sanitize(),
 		strings.Join(names, ", "),
 		strings.Join(values, ", "))
 }
@@ -225,10 +223,13 @@ func (upd Update) SQL(rel Relation) string {
 		}
 	}
 
-	return fmt.Sprintf("update %s set %s where %s;",
-		pgx.Identifier{rel.Namespace, rel.Name}.Sanitize(),
-		strings.Join(values, ", "),
-		strings.Join(cond, " and "))
+	sql := fmt.Sprintf("update %s set %s", rel.Sanitize(), strings.Join(values, ", "))
+	if len(cond) > 0 {
+		sql += " where " + strings.Join(cond, " and ")
+	}
+	sql += ";"
+
+	return sql
 }
 
 func (del Delete) SQL(rel Relation) string {
@@ -241,9 +242,7 @@ func (del Delete) SQL(rel Relation) string {
 		}
 	}
 
-	return fmt.Sprintf("delete from %s where %s;",
-		pgx.Identifier{rel.Namespace, rel.Name}.Sanitize(),
-		strings.Join(cond, " and "))
+	return fmt.Sprintf("delete from %s where %s;", rel.Sanitize(), strings.Join(cond, " and "))
 }
 
 func (rel Relation) SQL(oldRel Relation) string {

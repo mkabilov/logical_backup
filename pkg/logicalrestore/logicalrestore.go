@@ -1,9 +1,10 @@
 package logicalrestore
 
 import (
-	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
 
+	"github.com/ikitiki/logical_backup/pkg/decoder"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
 	"github.com/ikitiki/logical_backup/pkg/utils"
@@ -204,6 +206,10 @@ func (r *LogicalRestore) loadDump() error {
 }
 
 func (r *LogicalRestore) applyDelta(filePath string) error {
+	var (
+		sql   string
+		curTx int32
+	)
 	log.Printf("reading %q delta file", filePath)
 
 	fp, err := os.OpenFile(filePath, os.O_RDONLY, os.ModePerm)
@@ -212,31 +218,58 @@ func (r *LogicalRestore) applyDelta(filePath string) error {
 	}
 	defer fp.Close()
 
-	scanner := bufio.NewScanner(fp)
-	for scanner.Scan() {
-		var (
-			sql  string
-			lsn  uint64
-			txId int32
-		)
-		line := scanner.Text()
+	lnBuf := make([]byte, 8)
+	for {
+		if n, err := fp.Read(lnBuf); err == io.EOF {
+			break
+		} else if err != nil || n != 8 {
+			return fmt.Errorf("could not read: %v", err)
+		}
 
-		_, err := fmt.Sscanf(line, message.DeltaMessageFormat, &lsn, &txId, &sql)
+		ln := binary.BigEndian.Uint64(lnBuf) - 8
+		dataBuf := make([]byte, ln)
+
+		if n, err := fp.Read(dataBuf); err == io.EOF {
+			break
+		} else if err != nil || uint64(n) != ln {
+			return fmt.Errorf("could not read %d bytes: %v", ln, err)
+		}
+
+		msg, err := decoder.Parse(dataBuf)
 		if err != nil {
-			return fmt.Errorf("could not parse delta line %q: %v", line, err)
+			return fmt.Errorf("could not parse message: %v", err)
+			break
 		}
 
-		if lsn <= r.startLSN {
-			continue
+		switch v := msg.(type) {
+		case message.Relation:
+			//TODO: mind rename table case
+			if r.relInfo.Name != v.Name || r.relInfo.Namespace != v.Namespace {
+				log.Printf("message does not belong to current relation")
+			}
+			sql = v.SQL(r.relInfo)
+			r.relInfo.Columns = v.Columns
+			r.relInfo.ReplicaIdentity = v.ReplicaIdentity
+		case message.Insert:
+			sql = v.SQL(r.relInfo)
+		case message.Update:
+			sql = v.SQL(r.relInfo)
+		case message.Delete:
+			sql = v.SQL(r.relInfo)
+		case message.Begin:
+			curTx = v.XID
+			sql = fmt.Sprintf("BEGIN -- %d", curTx)
+		case message.Commit:
+			sql = fmt.Sprintf("COMMIT -- %d", curTx)
+		case message.Origin:
+			//TODO
+		case message.Truncate:
+			//TODO
+		case message.Type:
+			//TODO
 		}
 
-		if _, err := r.tx.Exec(sql); err != nil {
-			return fmt.Errorf("could not apply delta sql %q: %v", sql, err)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("could not read line: %v", err)
+		log.Println(sql)
 	}
 
 	return nil

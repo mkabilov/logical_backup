@@ -26,6 +26,9 @@ func main() {
 	}
 
 	log.Printf("Backup directory: %q", cfg.TempDir)
+	log.Printf("Archive directory: %q", cfg.ArchiveDir)
+	log.Printf("BackupThreshold: %v", cfg.BackupThreshold)
+	log.Printf("DeltasPerFile: %v", cfg.DeltasPerFile)
 	log.Printf("DB connection string: %s@%s:%d/%s slot:%q publication:%q",
 		cfg.DB.User, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database,
 		cfg.Slotname, cfg.PublicationName)

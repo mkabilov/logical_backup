@@ -217,29 +217,25 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 }
 
 func (t *TableBackup) periodicBackup() {
-	periodicBackup := time.NewTicker(t.cfg.PeriodBetweenBackups)
 	heartbeat := time.NewTicker(time.Minute)
 
 	for {
 		select {
 		case <-t.ctx.Done():
-			periodicBackup.Stop()
 			heartbeat.Stop()
 			return
-		case <-periodicBackup.C:
-			log.Printf("queuing backup of %s", t)
-			//t.basebackupQueue.Put(t)
 		case <-heartbeat.C:
-			if t.lastWrittenMessage.IsZero() || t.cfg.OldDeltaBackupTrigger.Seconds() < 1 {
+			// there must be some activity on the table and the backup threshold should be more than 0
+			if t.lastWrittenMessage.IsZero() ||
+				t.cfg.ForceBasebackupAfterInactivityInterval.Seconds() < 1 ||
+				t.deltasSinceBackupCnt == 0 {
 				break
 			}
 
-			if t.deltasSinceBackupCnt == 0 {
-				break
-			}
-
-			if time.Since(t.lastWrittenMessage) > t.cfg.OldDeltaBackupTrigger {
-				log.Printf("queuing backup of %s due to old delta message, lastwritten: %v", t, t.lastWrittenMessage)
+			// do we need to create a new backup?
+			if time.Since(t.lastWrittenMessage) > t.cfg.ForceBasebackupAfterInactivityInterval {
+				log.Printf("last write to the table %s happened %v ago, new backup is queued",
+					t, time.Since(t.lastWrittenMessage).Truncate(1*time.Second))
 				t.basebackupQueue.Put(t)
 			}
 		}

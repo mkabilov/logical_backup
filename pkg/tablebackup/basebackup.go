@@ -106,7 +106,7 @@ func (t *TableBackup) Basebackup() error {
 	t.archiveFiles <- t.infoFilename
 
 	log.Printf("%s backed up in %v; start lsn: %s",
-		t.String(), t.lastBackupDuration, pgx.FormatLSN(t.basebackupLSN))
+		t.String(), t.lastBackupDuration.Truncate(1*time.Second), pgx.FormatLSN(t.basebackupLSN))
 
 	if err := t.RotateOldDeltas(path.Join(t.tableDir, deltasDir), t.lastLSN); err != nil {
 		return fmt.Errorf("could not archive old deltas: %v", err)

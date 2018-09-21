@@ -10,21 +10,20 @@ import (
 )
 
 type Config struct {
-	TempDir               string         `yaml:"tempDir"`
-	Tables                []string       `yaml:"tables"`
-	DB                    pgx.ConnConfig `yaml:"db"`
-	Slotname              string         `yaml:"slotname"`
-	PublicationName       string         `yaml:"publication"`
-	TrackNewTables        bool           `yaml:"trackNewTables"`
-	DeltasPerFile         int            `yaml:"deltasPerFile"`
-	BackupThreshold       int            `yaml:"backupThreshold"`
-	ConcurrentBasebackups int            `yaml:"concurrentBasebackups"`
-	InitialBasebackup     bool           `yaml:"initialBasebackup"`
-	SendStatusOnCommit    bool           `yaml:"sendStatusOnCommit"`
-	Fsync                 bool           `yaml:"fsync"`
-	ArchiveDir            string         `yaml:"archiveDir"`
-	PeriodBetweenBackups  time.Duration  `yaml:"periodBetweenBackups"`
-	OldDeltaBackupTrigger time.Duration  `yaml:"oldDeltaBackupTrigger"`
+	TempDir                                string         `yaml:"tempDir"`
+	Tables                                 []string       `yaml:"tables"`
+	DB                                     pgx.ConnConfig `yaml:"db"`
+	Slotname                               string         `yaml:"slotname"`
+	PublicationName                        string         `yaml:"publication"`
+	TrackNewTables                         bool           `yaml:"trackNewTables"`
+	DeltasPerFile                          int            `yaml:"deltasPerFile"`
+	BackupThreshold                        int            `yaml:"backupThreshold"`
+	ConcurrentBasebackups                  int            `yaml:"concurrentBasebackups"`
+	InitialBasebackup                      bool           `yaml:"initialBasebackup"`
+	SendStatusOnCommit                     bool           `yaml:"sendStatusOnCommit"`
+	Fsync                                  bool           `yaml:"fsync"`
+	ArchiveDir                             string         `yaml:"archiveDir"`
+	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
 }
 
 func New(filename string) (*Config, error) {
@@ -38,6 +37,8 @@ func New(filename string) (*Config, error) {
 	if err := yaml.NewDecoder(configFp).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("could not decode config file: %v", err)
 	}
+	// forcing backups with sub-minute inactivity period makes no sense.
+	cfg.ForceBasebackupAfterInactivityInterval = cfg.ForceBasebackupAfterInactivityInterval.Truncate(1 * time.Minute)
 
 	return &cfg, nil
 }

@@ -152,21 +152,26 @@ argument. The following keys can be defined in that file:
 
 * **archiveDir**
   Main directory to store the resulting backup.
-     
-* **periodBetweenBackups**
-  Unconditionally force the new basebackup if the last one is older than the
-  period specified in this parameter.
-    
- * **oldDeltaBackupTrigger**
- Maximum time of no actviity on a table to trigger
- the new basebackup. Usually, on a table without any activity, the old deltas
- are retained for the whole `periodBetweenBackups`, which could be rather
- long. If there is a data retention policy that mandates to keep the old data
- for not more than a certain amount of time, it makes sense to set the
- `oldDeltaBackupTrigger` to a value slightly less than the retention interval
- to make sure the old data is removed from the backups even if nothing happens
- on the table.
- 
+
+ * **forceBasebackupAfterInactivityInterval** Trigger the new backup if there
+  was an activity since the last backup on the table, but the last delta
+  written is older than the time interval specified in this parameter. On some
+  tables the write ratio decreases exponentially with time so that we can
+  almost guarantee that they don't receive any writes after reaching a certain
+  age. Normally, the backup tool won't those tables anymore and leave the
+  previous basebackups and all deltas in the `archiveDir`; however, if there is
+  a retention policy that requires deletion of old data, we want to take a
+  fresh base backup after that deletion, which is supposed to be the last major
+  activity on the table, has concluded to avoid storing those deleted rows as a
+  part of the previous basebackup. Alternatively, this parameter could be used
+  to leave only one basebackup file without any deltas on those tables that
+  become immutable under a certain condition (i.e time interval). The value of
+  that parameter should have an integer with the time unit attached; valid
+  units are 's', 'm', 'h' for seconds, minutes and hours. For instance, the
+  value of `10h5s` corresponds to `10 hours 5 seconds`. Note that the actual
+  value will be truncate to minute, i.e. `5m55s` will result in a `5m` actual
+  interval.
+
 * **db**
   Database connection parameters. The following values are accepted.
   * **host**:
@@ -180,8 +185,3 @@ argument. The following keys can be defined in that file:
   the database to connnect to. It is not possible to backup multiple databases
   with one insance of the tool at the moment; however, multiple backup tools can
   work on the same cluster on different databases.
-
-All interval parameters (`periodBetweenBackups` and `oldDeltaBackupTrigger`)
-values should have an integer with the time unit attached; valid units are 's',
-'m', 'h' for seconds, minutes and hours. For instance, the value of `10h5s`
-correspoonds to `10 hours 5 seconds`.

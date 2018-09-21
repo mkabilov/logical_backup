@@ -36,6 +36,10 @@ func main() {
 
 	log.Printf("Fsync: %t", cfg.Fsync)
 	log.Printf("SendStatusOnCommit: %t", cfg.SendStatusOnCommit)
+	if cfg.ForceBasebackupAfterInactivityInterval > 0 {
+		log.Printf("Force new basebackup of a modified table after inactivity for: %v",
+			cfg.ForceBasebackupAfterInactivityInterval)
+	}
 
 	lb, err := logicalbackup.New(ctx, cfg)
 	if err != nil {

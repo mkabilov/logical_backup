@@ -292,13 +292,22 @@ func (t *TableBackup) Truncate() error {
 }
 
 func (t *TableBackup) CloseOldFiles() error {
-	if t.lastWrittenMessage.IsZero() {
+
+	if t.currentDeltaFp == nil {
+		log.Printf("WARNING: attempted to close a nil file pointer for table %s", t)
+	}
+	if t.lastWrittenMessage.IsZero() || (time.Since(t.lastWrittenMessage) <= time.Hour*3) {
 		return nil
 	}
 
-	if !t.lastWrittenMessage.IsZero() && time.Since(t.lastWrittenMessage) <= time.Hour*3 {
+	// Check that we shouldn't be writing any more data to this file
+	if t.deltaCnt < t.cfg.DeltasPerFile {
+		log.Printf("WARNING: looks like we still hae to write %d records to the file %q, not closing it",
+			t.cfg.DeltasPerFile-t.deltaCnt, t.currentDeltaFilename)
 		return nil
 	}
+
+	log.Printf("closing old file %s for table %s", t.currentDeltaFilename, t)
 
 	return t.currentDeltaFp.Close()
 }

@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/pgtype"
 	"io"
 	"log"
 	"os"
 	"path"
+	"strings"
+	"sync"
 	"time"
-
-	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
@@ -21,18 +22,28 @@ import (
 )
 
 const (
-	dirPerms       = os.ModePerm
-	archiverBuffer = 100
-	deltasDir      = "deltas"
+	dirPerms                 = os.ModePerm
+	archiverBuffer           = 100
+	deltasDirName            = "deltas"
+	maxArchiverRetryTimeout  = 5 * time.Second
+	maxArchiverRetryAttempts = 3
+	archiverWorkerNapTime    = 500 * time.Millisecond
+	archiverCloseNapTime     = 10 * time.Minute
 )
 
 type TableBackuper interface {
 	SaveRawMessage([]byte, uint64) (uint64, error)
-	Basebackup() error
+	TableBaseBackup
 	Files() int
 	Truncate() error
 	String() string
-	CloseOldFiles() error
+}
+
+type TableBaseBackup interface {
+	SetBasebackupPending()
+	IsBasebackupPending() bool
+	ClearBasebackupPending()
+	RunBasebackup() error
 }
 
 type TableBackup struct {
@@ -50,8 +61,8 @@ type TableBackup struct {
 	dbCfg pgx.ConnConfig
 
 	// Files
-	tableDir           string
-	archiveDir         string
+	tempDir            string
+	finalDir           string
 	basebackupFilename string
 	infoFilename       string
 
@@ -61,15 +72,18 @@ type TableBackup struct {
 	deltasSinceBackupCnt int
 	filenamePostfix      uint32
 	lastLSN              uint64
+
 	currentDeltaFp       *os.File
+	DeltaFileAccessMutex *sync.Mutex
 	currentDeltaFilename string
 
 	// Basebackup
-	basebackupLSN       uint64
+	firstDeltaLSNToKeep uint64
 	lastBasebackupTime  time.Time
 	sleepBetweenBackups time.Duration
 	lastBackupDuration  time.Duration
 	lastWrittenMessage  time.Time
+	basebackupIsPending bool
 
 	locker uint32
 
@@ -83,17 +97,18 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 	tableDir := utils.TableDir(tbl)
 
 	tb := TableBackup{
-		Identifier:          tbl,
-		ctx:                 ctx,
-		sleepBetweenBackups: time.Second * 3,
-		cfg:                 cfg,
-		dbCfg:               dbCfg,
-		tableDir:            path.Join(cfg.TempDir, tableDir),
-		archiveDir:          path.Join(cfg.ArchiveDir, tableDir),
-		basebackupFilename:  "basebackup.copy",
-		infoFilename:        "info.yaml",
-		msgLen:              make([]byte, 8),
-		archiveFiles:        make(chan string, archiverBuffer),
+		Identifier:           tbl,
+		ctx:                  ctx,
+		sleepBetweenBackups:  time.Second * 3,
+		cfg:                  cfg,
+		dbCfg:                dbCfg,
+		tempDir:              path.Join(cfg.TempDir, tableDir),
+		finalDir:             path.Join(cfg.ArchiveDir, tableDir),
+		basebackupFilename:   "basebackup.copy",
+		infoFilename:         "info.yaml",
+		msgLen:               make([]byte, 8),
+		archiveFiles:         make(chan string, archiverBuffer),
+		DeltaFileAccessMutex: &sync.Mutex{},
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -109,14 +124,18 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 }
 
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
+	t.DeltaFileAccessMutex.Lock()
+	defer t.DeltaFileAccessMutex.Unlock()
+
 	if t.deltaCnt >= t.cfg.DeltasPerFile || t.currentDeltaFp == nil {
-		if err := t.rotateFile(lsn); err != nil {
+		if err := t.createNewDeltaFile(lsn); err != nil {
 			return 0, fmt.Errorf("could not rotate file: %v", err)
 		}
 	}
 
-	if t.deltaFilesCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 {
+	if t.deltaFilesCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
 		log.Printf("queueing base backup because we reached backupDeltaThreshold %s", t)
+		t.SetBasebackupPending()
 		t.basebackupQueue.Put(t)
 	}
 
@@ -143,55 +162,138 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	return ln, nil
 }
 
+// the archiver goroutine is responsible for moving complete files to the final backup directory, as well as for closing
+// files in the temporary directory that didn't receive any writes for the specific amount of time (currently 3h)
 func (t *TableBackup) archiver() {
+	closeCall := time.NewTicker(archiverCloseNapTime)
+	q := queue.New(t.ctx)
+
+	// worker routine to do the heavy-lifting
+	go func() {
+		for {
+			select {
+			case <-time.After(archiverWorkerNapTime):
+				for {
+					obj, err := q.Get()
+					if err != nil {
+						if err == context.Canceled {
+							return
+						}
+						// the only other error we expect is that the queue is empty, in which case we go to sleep
+						break
+					}
+					fname := obj.(string)
+					lsn := uint64(0)
+					if isDelta, filename := t.isDeltaFileName(fname); isDelta {
+						var err error
+						lsn, err = utils.GetLSNFromDeltaFilename(filename)
+						if err != nil {
+							log.Printf("could not decode lsn from the file name %s: %v", filename)
+						}
+					}
+
+					archiveAction := func() (bool, error) {
+						if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
+							log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
+								fname, pgx.FormatLSN(t.firstDeltaLSNToKeep))
+							// a  code in RunBasebackup will take care of removing actual files from the temp directory
+							return false, nil
+						}
+						err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname))
+						return err != nil, err
+					}
+
+					err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
+					if err != nil {
+						log.Printf("could not archive %s: %v", fname, err)
+					}
+				}
+			}
+		}
+	}()
 	for {
 		select {
 		case file := <-t.archiveFiles:
-			sourceFile := path.Join(t.tableDir, file)
-			destFile := path.Join(t.archiveDir, file)
-
-			if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
-				log.Printf("source file doesn't exist: %q; skipping", sourceFile)
-				break
-			}
-
-			if st, err := os.Stat(destFile); os.IsExist(err) {
-				if st.Size() == 0 {
-					os.Remove(destFile)
-				} else {
-					log.Printf("destination file is not empty %q; skipping", destFile)
-				}
-			}
-
-			if _, err := copyFile(sourceFile, destFile); err != nil {
-				os.Remove(destFile)
-				log.Printf("could not move %s -> %s file: %v", sourceFile, destFile, err)
-				break
-			}
-
-			if err := os.Remove(sourceFile); err != nil {
-				log.Printf("could not delete old file: %v", err)
-			}
+			q.Put(file)
 		case <-t.ctx.Done():
+			closeCall.Stop()
 			return
+		case <-closeCall.C:
+			if !t.triggerArchiveTimeoutOnTable() {
+				continue
+			}
+			t.DeltaFileAccessMutex.Lock()
+			if err := t.currentDeltaFp.Close(); err != nil {
+				log.Printf("could not close %s due to inactivity: %v", t.currentDeltaFilename, err)
+				t.DeltaFileAccessMutex.Unlock()
+				continue
+			}
+			t.currentDeltaFp = nil
+			// unlock as soon as possible, but no sooner than clearing up current delta file pointer and name
+			fname := t.currentDeltaFilename
+			t.currentDeltaFilename = ""
+
+			t.DeltaFileAccessMutex.Unlock()
+
+			q.Put(fname)
+			log.Printf("archiving %s due to archiver timeout", fname)
+
 		}
 	}
+}
+
+// if we should archive the active non-empty delta due to the lack of activity on the table for a certain amount of time
+// TODO: make sure we don't have empty delta files opened in the first place and remove lastWrittenMessage.IsZero check.
+func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
+	return t.currentDeltaFp != nil &&
+		!t.lastWrittenMessage.IsZero() &&
+		t.cfg.ArchiverTimeout > 0 &&
+		time.Since(t.lastWrittenMessage) > t.cfg.ArchiverTimeout
+}
+
+// archiveOneFile returns error only if the actual copy failed, so that we could retry it. In all other "unusual" cases
+// it just displays a cause and bails out.
+func archiveOneFile(sourceFile, destFile string) (err error) {
+	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
+		fmt.Printf("source file doesn't exist: %q; skipping", sourceFile)
+		return nil
+	}
+
+	if st, err := os.Stat(destFile); os.IsExist(err) {
+		if st.Size() == 0 {
+			os.Remove(destFile)
+		} else {
+			fmt.Printf("destination file is not empty %q; skipping", destFile)
+			return nil
+
+		}
+	}
+
+	if _, err := copyFile(sourceFile, destFile); err != nil {
+		os.Remove(destFile)
+		return fmt.Errorf("could not move %s -> %s file: %v", sourceFile, destFile, err)
+	}
+
+	if err := os.Remove(sourceFile); err != nil {
+		fmt.Printf("could not delete old file: %v", err)
+	}
+	return nil
 }
 
 func (t *TableBackup) Files() int {
 	return t.deltaFilesCnt
 }
 
-func (t *TableBackup) rotateFile(newLSN uint64) error {
+func (t *TableBackup) createNewDeltaFile(newLSN uint64) error {
 	if t.currentDeltaFp != nil {
 		if err := t.currentDeltaFp.Close(); err != nil {
 			return fmt.Errorf("could not close old file: %v", err)
 		}
 
-		t.archiveFiles <- t.currentDeltaFilename //TODO: potential lock
+		t.archiveFiles <- t.currentDeltaFilename
 	}
 
-	filename := path.Join(deltasDir, fmt.Sprintf("%016x", newLSN))
+	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
 		t.filenamePostfix++
 	} else {
@@ -202,7 +304,7 @@ func (t *TableBackup) rotateFile(newLSN uint64) error {
 		filename = fmt.Sprintf("%s.%x", filename, t.filenamePostfix)
 	}
 
-	fp, err := os.OpenFile(path.Join(t.tableDir, filename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	fp, err := os.OpenFile(path.Join(t.tempDir, filename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return err
 	}
@@ -228,7 +330,8 @@ func (t *TableBackup) periodicBackup() {
 			// there must be some activity on the table and the backup threshold should be more than 0
 			if t.lastWrittenMessage.IsZero() ||
 				t.cfg.ForceBasebackupAfterInactivityInterval.Seconds() < 1 ||
-				t.deltasSinceBackupCnt == 0 {
+				t.deltasSinceBackupCnt == 0 ||
+				t.IsBasebackupPending() {
 				break
 			}
 
@@ -236,6 +339,7 @@ func (t *TableBackup) periodicBackup() {
 			if time.Since(t.lastWrittenMessage) > t.cfg.ForceBasebackupAfterInactivityInterval {
 				log.Printf("last write to the table %s happened %v ago, new backup is queued",
 					t, time.Since(t.lastWrittenMessage).Truncate(1*time.Second))
+				t.SetBasebackupPending()
 				t.basebackupQueue.Put(t)
 			}
 		}
@@ -247,8 +351,8 @@ func (t *TableBackup) String() string {
 }
 
 func (t *TableBackup) createDirs() error {
-	deltasPath := path.Join(t.tableDir, deltasDir)
-	archiveDeltasPath := path.Join(t.archiveDir, deltasDir)
+	deltasPath := path.Join(t.tempDir, deltasDirName)
+	archiveDeltasPath := path.Join(t.finalDir, deltasDirName)
 
 	if _, err := os.Stat(deltasPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(deltasPath, dirPerms); err != nil {
@@ -275,7 +379,7 @@ func (t *TableBackup) hasRows() (bool, error) {
 }
 
 func (t *TableBackup) Truncate() error {
-	if err := os.RemoveAll(t.tableDir); err != nil {
+	if err := os.RemoveAll(t.tempDir); err != nil {
 		return fmt.Errorf("could not recreate table dir: %v", err)
 	}
 
@@ -291,25 +395,39 @@ func (t *TableBackup) Truncate() error {
 	return nil
 }
 
-func (t *TableBackup) CloseOldFiles() error {
-
-	if t.currentDeltaFp == nil {
-		log.Printf("WARNING: attempted to close a nil file pointer for table %s", t)
+func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
+	if name == t.basebackupFilename || name == t.infoFilename {
+		return false, name
 	}
-	if t.lastWrittenMessage.IsZero() || (time.Since(t.lastWrittenMessage) <= time.Hour*3) {
-		return nil
-	}
-
-	// Check that we shouldn't be writing any more data to this file
-	if t.deltaCnt < t.cfg.DeltasPerFile {
-		log.Printf("WARNING: looks like we still hae to write %d records to the file %q, not closing it",
-			t.cfg.DeltasPerFile-t.deltaCnt, t.currentDeltaFilename)
-		return nil
+	dir, file := path.Split(name)
+	if dir == deltasDirName {
+		return true, file
 	}
 
-	log.Printf("closing old file %s for table %s", t.currentDeltaFilename, t)
+	fields := strings.Split(file, ".")
+	finalPos := 0
+	for pos, ch := range fields[0] {
+		if pos >= 16 && !(ch >= '0' && ch <= '9' || ch >= 'A' && ch <= 'F') {
+			return false, name
+		}
+		finalPos++
+	}
+	if finalPos != 16 {
+		return false, name
+	}
+	if len(fields) < 2 {
+		return true, file
+	}
+	if len(fields) == 2 {
+		for _, ch := range fields[1] {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return false, name
+			}
+		}
+		return true, file
+	}
+	return false, name
 
-	return t.currentDeltaFp.Close()
 }
 
 func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, error) {

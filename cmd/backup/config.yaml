@@ -1,4 +1,4 @@
-tempDir: /tmp/backups
+tempDir: /tmp/staging
 deltasPerFile: 10000
 backupThreshold: 100
 concurrentBasebackups: 5
@@ -8,11 +8,12 @@ publication: mypub
 sendStatusOnCommit: false
 initialBasebackup: true
 fsync: false
-archiveDir: /tmp/backup2
+archiveDir: /tmp/final
 forceBasebackupAfterInactivityInterval: 24h
+archiverTimeout: 3h
 db:
-    host: 127.0.0.1
-    port: 5432
-    database: demo
-    user: mkabilov
+  host: 127.0.0.1
+  port: 5432
+  database: postgres
+  user: postgres
 

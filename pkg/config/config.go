@@ -24,6 +24,7 @@ type Config struct {
 	Fsync                                  bool           `yaml:"fsync"`
 	ArchiveDir                             string         `yaml:"archiveDir"`
 	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
+	ArchiverTimeout                        time.Duration  `yaml:"archiverTimeout"`
 }
 
 func New(filename string) (*Config, error) {

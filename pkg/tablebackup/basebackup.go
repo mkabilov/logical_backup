@@ -230,7 +230,7 @@ func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
 		filename := v.Name()
 		if lsn, err := utils.GetLSNFromDeltaFilename(filename); err == nil {
 			if lsn < t.firstDeltaLSNToKeep {
-				filename = fmt.Sprintf("%s/%s", deltasDir, filename)
+				filename = path.Join(deltasDir, filename)
 				if err := os.Remove(filename); err != nil {
 					return fmt.Errorf("could not remove %q file: %v", filename, err)
 				}

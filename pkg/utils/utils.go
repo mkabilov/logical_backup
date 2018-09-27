@@ -3,6 +3,7 @@ package utils
 import (
 	"crypto/md5"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +14,8 @@ import (
 func TableDir(tbl message.Identifier) string {
 	tblHash := fmt.Sprintf("%x", md5.Sum([]byte(tbl.Sanitize())))
 
-	return fmt.Sprintf("%s/%s/%s/%s/%s.%s", tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, tbl.Namespace, tbl.Name)
+	// TODO: consider removing tblHash altogether to shorten the path
+	return path.Join(tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, fmt.Sprintf("%s.%s", tbl.Namespace, tbl.Name))
 }
 
 // Retry retries a given function until either it returns false, which indicates success, or the number of attempts

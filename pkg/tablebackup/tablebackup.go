@@ -75,7 +75,7 @@ type TableBackup struct {
 	lastLSN              uint64
 
 	currentDeltaFp       *os.File
-	DeltaFileAccessMutex *sync.Mutex
+	deltaFileAccessMutex *sync.Mutex
 	currentDeltaFilename string
 
 	// Basebackup
@@ -109,7 +109,7 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 		infoFilename:         "info.yaml",
 		msgLen:               make([]byte, 8),
 		archiveFiles:         make(chan string, archiverBuffer),
-		DeltaFileAccessMutex: &sync.Mutex{},
+		deltaFileAccessMutex: &sync.Mutex{},
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -125,8 +125,8 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 }
 
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
-	t.DeltaFileAccessMutex.Lock()
-	defer t.DeltaFileAccessMutex.Unlock()
+	t.deltaFileAccessMutex.Lock()
+	defer t.deltaFileAccessMutex.Unlock()
 
 	if t.deltaCnt >= t.cfg.DeltasPerFile || t.currentDeltaFp == nil {
 		if err := t.createNewDeltaFile(lsn); err != nil {
@@ -223,10 +223,10 @@ func (t *TableBackup) archiver() {
 			if !t.triggerArchiveTimeoutOnTable() {
 				continue
 			}
-			t.DeltaFileAccessMutex.Lock()
+			t.deltaFileAccessMutex.Lock()
 			if err := t.currentDeltaFp.Close(); err != nil {
 				log.Printf("could not close %s due to inactivity: %v", t.currentDeltaFilename, err)
-				t.DeltaFileAccessMutex.Unlock()
+				t.deltaFileAccessMutex.Unlock()
 				continue
 			}
 			t.currentDeltaFp = nil
@@ -234,7 +234,7 @@ func (t *TableBackup) archiver() {
 			fname := t.currentDeltaFilename
 			t.currentDeltaFilename = ""
 
-			t.DeltaFileAccessMutex.Unlock()
+			t.deltaFileAccessMutex.Unlock()
 
 			q.Put(fname)
 			log.Printf("archiving %s due to archiver timeout", fname)

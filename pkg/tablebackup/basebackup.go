@@ -3,7 +3,6 @@ package tablebackup
 import (
 	"database/sql"
 	"fmt"
-	"github.com/ikitiki/logical_backup/pkg/utils"
 	"io/ioutil"
 	"log"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/ikitiki/logical_backup/pkg/message"
+	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 func (t *TableBackup) RunBasebackup() error {

@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
 	"io"
 	"log"
 	"os"
@@ -13,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/pgtype"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"

@@ -100,8 +100,8 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:   ctx,
-		dbCfg: pgxConn,
+		ctx:                    ctx,
+		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		relations:              make(map[message.Identifier]message.Relation),
@@ -666,34 +666,19 @@ func (b *LogicalBackup) BackgroundBasebackuper() {
 			return
 		}
 
-		if err := obj.(tablebackup.TableBackuper).Basebackup(); err != nil && err != context.Canceled {
-			log.Printf("could not basebackup %s: %v", obj.(tablebackup.TableBackuper), err)
+		t := obj.(tablebackup.TableBackuper)
+		if err := t.RunBasebackup(); err != nil && err != context.Canceled {
+			log.Printf("could not basebackup %s: %v", t, err)
 		}
-	}
-}
-
-func (b *LogicalBackup) closeOldFiles() {
-	defer b.waitGr.Done()
-	ticker := time.NewTicker(time.Hour)
-
-	for {
-		select {
-		case <-b.ctx.Done():
-			ticker.Stop()
-			return
-		case <-ticker.C:
-			for _, t := range b.backupTables {
-				if err := t.CloseOldFiles(); err != nil {
-					log.Printf("could not close %s: %v", t, err)
-				}
-			}
-		}
+		// from now on we can schedule new basebackups on that table
+		t.ClearBasebackupPending()
 	}
 }
 
 func (b *LogicalBackup) QueueBasebackupTables() {
 	for _, t := range b.backupTables {
 		b.basebackupQueue.Put(t)
+		t.SetBasebackupPending()
 	}
 }
 
@@ -712,7 +697,4 @@ func (b *LogicalBackup) Run() {
 			log.Fatalf("Could not start http server: %v", err2)
 		}
 	}()
-
-	b.waitGr.Add(1)
-	go b.closeOldFiles()
 }

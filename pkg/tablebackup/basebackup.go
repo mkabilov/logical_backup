@@ -65,13 +65,20 @@ func (t *TableBackup) RunBasebackup() error {
 		}
 
 		defer func() {
+			// do rollback if the code has thrown an error or simply found no rows, otherwise commit the changes.
+			// if the error happens during rollback or commit we either return it, if it is the first error in the
+			// transaction, or show it to the user to if there was a prior one, to avoid making that prior one.
 			if stop || err != nil {
-				if err := t.txRollback(); err != nil {
-					fmt.Printf("could not rollback: %v", err)
+				if err2 := t.txRollback(); err2 != nil {
+					fmt.Printf("could not rollback: %v", err2)
+					if err == nil {
+						err = err2
+					}
 				}
 			} else {
 				if err := t.txCommit(); err != nil {
 					stop = true
+					// in this case we also want to return this error
 					err = fmt.Errorf("could not commit: %v", err)
 
 				}
@@ -131,7 +138,7 @@ func (t *TableBackup) RunBasebackup() error {
 	// file gets rotated after creation of the slot but before the LSN to keep is recorded; to avoid that, we keep
 	// the LSN before and after the logical slot creation and, in case of their mismatch, take the latest delta
 	// file that has been created before the slot. Since changes to firstDeltaLSNToKeep are effective right away on the
-	// archiver side we go extra mile not to assign intermediate results to it.
+	// archiver side, we go extra mile not to assign intermediate results to it.
 
 	candidateLSN := postBackupLSN
 
@@ -157,8 +164,11 @@ func (t *TableBackup) RunBasebackup() error {
 
 	t.archiveFiles <- t.infoFilename
 
-	log.Printf("%s backed up in %v; start lsn: %s",
-		t.String(), t.lastBackupDuration.Truncate(1*time.Second), pgx.FormatLSN(backupLSN))
+	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
+		t.String(),
+		t.lastBackupDuration.Truncate(1*time.Second),
+		pgx.FormatLSN(backupLSN),
+		pgx.FormatLSN(t.firstDeltaLSNToKeep))
 
 	// not that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
 	for _, basedir := range []string{t.tempDir, t.finalDir} {
@@ -348,7 +358,7 @@ func (t *TableBackup) createTempReplicationSlot() (uint64, error) {
 		return lsn, fmt.Errorf("no running transaction")
 	}
 
-	// XXX: we don't need to accumulate WAL on the server throughout the whole COPY running time. We need the slot
+	// we don't need to accumulate WAL on the server throughout the whole COPY running time. We need the slot
 	// exclusively to figure out our transaction LSN, why not drop it once we have got it?
 
 	row := t.tx.QueryRow(fmt.Sprintf("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s USE_SNAPSHOT",
@@ -357,6 +367,13 @@ func (t *TableBackup) createTempReplicationSlot() (uint64, error) {
 	if err := row.Scan(&createdSlotName, &basebackupLSN, &snapshotName, &plugin); err != nil {
 		return lsn, fmt.Errorf("could not scan: %v", err)
 	}
+
+	defer func() {
+		if _, err := t.tx.Exec(fmt.Sprintf("DROP_REPLICATION_SLOT %s", t.tempSlotName())); err != nil {
+			log.Printf("could not drop replication slot %s right away: %v, it will be dropped at the end of the backup",
+				t.tempSlotName(), err)
+		}
+	}()
 
 	if !basebackupLSN.Valid {
 		return lsn, fmt.Errorf("null consistent point")

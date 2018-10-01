@@ -11,7 +11,6 @@ import (
 
 type Config struct {
 	TempDir                                string         `yaml:"tempDir"`
-	Tables                                 []string       `yaml:"tables"`
 	DB                                     pgx.ConnConfig `yaml:"db"`
 	Slotname                               string         `yaml:"slotname"`
 	PublicationName                        string         `yaml:"publication"`

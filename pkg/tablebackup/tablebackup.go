@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/pgtype"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/utils"
@@ -433,12 +432,13 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 
 func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, error) {
 	var rel message.Relation
-	row := tx.QueryRow(fmt.Sprintf(`SELECT c.oid, c.relreplident 
+	row := tx.QueryRow(`
+		SELECT c.oid, c.relreplident 
 		FROM pg_catalog.pg_class c
 		LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = %s AND c.relname = %s`,
-		dbutils.QuoteLiteral(tbl.Namespace),
-		dbutils.QuoteLiteral(tbl.Name)))
+		WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`,
+		tbl.Namespace,
+		tbl.Name)
 
 	var relOid uint32
 	var relRepIdentity pgtype.BPChar
@@ -447,23 +447,11 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, er
 		return rel, fmt.Errorf("could not fetch table info: %v", err)
 	}
 
-	rows, err := tx.Query(fmt.Sprintf(`SELECT
-    a.attname,
-    t.oid,
-	a.atttypmod,
-	format_type(t.oid, a.atttypmod)
-FROM pg_catalog.pg_class c
-LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
-LEFT JOIN pg_catalog.pg_type t ON a.atttypid = t.oid 
-WHERE 
-    n.nspname = %s AND c.relname = %s
-    AND a.attnum > 0::pg_catalog.int2
-    AND a.attisdropped = false
-ORDER BY
-    a.attnum`,
-		dbutils.QuoteLiteral(tbl.Namespace),
-		dbutils.QuoteLiteral(tbl.Name)))
+	rows, err := tx.Query(`
+	SELECT a.attname, a.atttypid, a.atttypmod, format_type(a.atttypid, a.atttypmod)
+	FROM pg_catalog.pg_attribute a  
+	WHERE a.attrelid = $1 AND a.attnum > 0 AND a.attisdropped = false
+	ORDER BY a.attnum`, relOid)
 	if err != nil {
 		return rel, fmt.Errorf("could not exec query: %v", err)
 	}

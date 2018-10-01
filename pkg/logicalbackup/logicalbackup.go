@@ -9,7 +9,6 @@ import (
 	"net/http/pprof"
 	"os"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -134,35 +133,16 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 
 	log.Printf("My PID: %d", conn.PID())
 
-	//TODO: have a separate "init" command which will set replica identity and create replication slots/publications
-	if err := lb.checkTablesReplicaIdentities(conn); err != nil {
-		return nil, err
-	}
-
 	if err := lb.initPublication(conn); err != nil {
 		return nil, err
 	}
 
 	slotExists, err = lb.initSlot(conn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not init replication slot; %v", err)
 	}
 
-	if err := lb.initTables(conn, cfg.Tables); err != nil {
-		return nil, err
-	}
-
-	if len(lb.backupTables) == 0 {
-		if !lb.cfg.TrackNewTables {
-			log.Fatalf("no tables to backup")
-		}
-	} else {
-		tables := make([]string, 0)
-		for _, t := range lb.backupTables {
-			tables = append(tables, t.String())
-		}
-	}
-
+	//TODO: have a separate "init" command which will set replica identity and create replication slots/publications
 	if rc, err := pgx.ReplicationConnect(cfg.DB); err != nil {
 		return nil, fmt.Errorf("could not connect using replication protocol: %v", err)
 	} else {
@@ -193,10 +173,9 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		}
 	}
 
-	if len(cfg.Tables) > 0 {
-		log.Printf("Tables to backup: %s", strings.Join(cfg.Tables, ", "))
-	} else {
-		log.Printf("Backing up all the publication tables")
+	// run per-table backups after we ensure there is a replication slot to retain changes.
+	if err = lb.prepareTablesForPublication(conn); err != nil {
+		return nil, fmt.Errorf("could not prepare tables for backup: %v", err)
 	}
 
 	return lb, nil
@@ -481,49 +460,6 @@ func (b *LogicalBackup) Wait() {
 	b.waitGr.Wait()
 }
 
-func (b *LogicalBackup) initTables(conn *pgx.Conn, tables []string) error {
-	query := `select c.oid, n.nspname, c.relname
-     from pg_class c
-     inner join pg_namespace n on (n.oid = c.relnamespace)
-     inner join pg_get_publication_tables('%s') x on x.relid = c.oid;`
-
-	if len(tables) > 0 {
-		tbls := make([]string, 0)
-		for _, t := range tables {
-			tbls = append(tbls, fmt.Sprintf("'%s'", t))
-		}
-
-		query += " where n.nspname || '.' || c.relname in (" + strings.Join(tbls, ", ") + ")"
-	}
-	query = fmt.Sprintf(query, b.cfg.PublicationName)
-
-	rows, err := conn.Query(query)
-	if err != nil {
-		return fmt.Errorf("could not execute query: %v", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			t   message.Identifier
-			oid uint32
-		)
-
-		if err := rows.Scan(&oid, &t.Namespace, &t.Name); err != nil {
-			return fmt.Errorf("could not scan: %v", err)
-		}
-
-		tb, err := tablebackup.New(b.ctx, b.cfg, t, b.dbCfg, b.basebackupQueue)
-		if err != nil {
-			return fmt.Errorf("could not create tablebackup instance: %v", err)
-		}
-
-		b.backupTables[oid] = tb
-	}
-
-	return nil
-}
-
 func (b *LogicalBackup) initPublication(conn *pgx.Conn) error {
 	rows, err := conn.Query("select 1 from pg_publication where pubname = $1;", b.cfg.PublicationName)
 	if err != nil {
@@ -545,6 +481,69 @@ func (b *LogicalBackup) initPublication(conn *pgx.Conn) error {
 	rows.Close()
 	log.Printf("created missing publication: %q", query)
 
+	return nil
+}
+
+// register tables for the backup; add replica identity when necessary
+func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
+	// fetch all tables from the current publication, together with the information on whether we need to create
+	// replica identity full for them
+	type tableInfo struct {
+		oid                uint32
+		t                  message.Identifier
+		hasReplicaIdentity bool
+	}
+	rows, err := conn.Query(`
+			select c.oid,
+				   n.nspname,
+				   c.relname,
+       			   CASE
+         			WHEN csr.oid IS NULL AND c.relreplident IN ('d', 'n') THEN true
+         			ELSE false END AS has_replica_identity
+			from pg_class c
+				   join pg_namespace n on n.oid = c.relnamespace
+       			   join pg_publication_tables pub on (c.relname = pub.tablename and n.nspname = pub.schemaname)
+       			   left join pg_constraint csr on (csr.conrelid = c.oid and csr.contype = 'p')
+			where c.relkind = 'r'
+  			  and pub.pubname = $1
+			order by c.oid;`, b.cfg.PublicationName)
+	if err != nil {
+		return fmt.Errorf("could not execute query: %v", err)
+	}
+
+	tables := make([]tableInfo, 0)
+	if err = func() error {
+		defer rows.Close()
+		for rows.Next() {
+			tab := tableInfo{}
+			if err := rows.Scan(&tab.oid, &tab.t.Namespace, &tab.t.Name, &tab.hasReplicaIdentity); err != nil {
+				return fmt.Errorf("could not fetch row values from the driver: %v", err)
+			}
+			tables = append(tables, tab)
+		}
+		return nil
+	}(); err != nil {
+		return err
+	}
+
+	if len(tables) == 0 && !b.cfg.TrackNewTables {
+		return fmt.Errorf("no tables found")
+	}
+	for _, tab := range tables {
+		if !tab.hasReplicaIdentity {
+			fqtn := fmt.Sprintf("%s", pgx.Identifier{tab.t.Namespace, tab.t.Name}.Sanitize())
+			if _, err := conn.Exec(fmt.Sprintf("alter table only %s replica identity full", fqtn)); err != nil {
+				return fmt.Errorf("could not set replica identity to full for table %s: %v", fqtn, err)
+			}
+			log.Printf("set replica identity to full for table %s", fqtn)
+		}
+
+		tb, err := tablebackup.New(b.ctx, b.cfg, tab.t, b.dbCfg, b.basebackupQueue)
+		if err != nil {
+			return fmt.Errorf("could not create tablebackup instance: %v", err)
+		}
+		b.backupTables[tab.oid] = tb
+	}
 	return nil
 }
 
@@ -614,49 +613,6 @@ func (b *LogicalBackup) storeRestartLSN() error {
 	return nil
 }
 
-func (b *LogicalBackup) checkTablesReplicaIdentities(conn *pgx.Conn) error {
-	tables := make([]string, 0)
-
-	rows, err := conn.Query(`select quote_ident(t.nspname) || '.' || quote_ident(t.relname)
-		from (
-			select c.oid, c.relname, n.nspname 
-			from pg_class c 
-			inner join pg_namespace n on n.oid = c.relnamespace
-			where c.relkind = 'r' 
-				and n.nspname not in ('pg_catalog', 'information_schema')
-				and c.relreplident in ('d', 'n')
-		) as t left outer join pg_constraint c on c.contype = 'p' and c.conrelid = t.oid
-		where c.conname is null 
-		order by t.oid;`)
-	if err != nil {
-		return fmt.Errorf("could not execute query: %v", err)
-	}
-
-	for rows.Next() {
-		var quotedTable string
-
-		if err := rows.Scan(&quotedTable); err != nil {
-			rows.Close()
-			return fmt.Errorf("could not scan: %v", err)
-		}
-
-		tables = append(tables, quotedTable)
-	}
-	rows.Close()
-
-	for _, t := range tables {
-		if _, err := conn.Exec(fmt.Sprintf("alter table only %s replica identity full", t)); err != nil {
-			return fmt.Errorf("could not set replica identity for table %s: %v", t, err)
-		}
-
-		log.Printf("set replica identity for table %s to full", t)
-	}
-
-	//TODO: check stuff like wal_level = logical, max_replication_slots, max_wal_senders
-	//TODO: for the tables without PK alter table to use replica identity full
-	return nil
-}
-
 func (b *LogicalBackup) BackgroundBasebackuper() {
 	defer b.waitGr.Done()
 
@@ -675,6 +631,7 @@ func (b *LogicalBackup) BackgroundBasebackuper() {
 	}
 }
 
+// TODO: make it a responsibility of periodicBackup on a table itself
 func (b *LogicalBackup) QueueBasebackupTables() {
 	for _, t := range b.backupTables {
 		b.basebackupQueue.Put(t)

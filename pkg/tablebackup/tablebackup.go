@@ -32,8 +32,9 @@ const (
 )
 
 type TableBackuper interface {
-	SaveRawMessage([]byte, uint64) (uint64, error)
 	TableBaseBackup
+
+	SaveRawMessage([]byte, uint64) (uint64, error)
 	Files() int
 	Truncate() error
 	String() string

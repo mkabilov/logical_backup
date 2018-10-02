@@ -1,6 +1,7 @@
 package tablebackup
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -22,12 +23,13 @@ import (
 )
 
 const (
-	dirPerms                 = os.ModePerm
-	deltasDirName            = "deltas"
-	maxArchiverRetryTimeout  = 5 * time.Second
-	maxArchiverRetryAttempts = 3
-	archiverWorkerNapTime    = 500 * time.Millisecond
-	archiverCloseNapTime     = 10 * time.Minute
+	dirPerms                        = os.ModePerm
+	deltasDirName                   = "deltas"
+	maxArchiverRetryTimeout         = 5 * time.Second
+	maxArchiverRetryAttempts        = 3
+	archiverWorkerNapTime           = 500 * time.Millisecond
+	archiverCloseNapTime            = 1 * time.Minute
+	invalidLSN               uint64 = 0
 )
 
 type TableBackuper interface {
@@ -73,9 +75,12 @@ type TableBackup struct {
 	filenamePostfix      uint32
 	lastLSN              uint64
 
-	currentDeltaFp       *os.File
-	deltaFileAccessMutex *sync.Mutex
-	currentDeltaFilename string
+	segmentBufferMutex *sync.Mutex
+	segmentFilename    string
+	filenamePostfix    uint32
+
+	// buffer for the current delta segment
+	segmentBuffer bytes.Buffer
 
 	// Basebackup
 	firstDeltaLSNToKeep uint64
@@ -97,18 +102,18 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 	tableDir := utils.TableDir(tbl)
 
 	tb := TableBackup{
-		Identifier:           tbl,
-		ctx:                  ctx,
-		sleepBetweenBackups:  time.Second * 3,
-		cfg:                  cfg,
-		dbCfg:                dbCfg,
-		tempDir:              path.Join(cfg.TempDir, tableDir),
-		finalDir:             path.Join(cfg.ArchiveDir, tableDir),
-		basebackupFilename:   "basebackup.copy",
-		infoFilename:         "info.yaml",
-		msgLen:               make([]byte, 8),
-		archiveFilesQueue:    queue.New(ctx),
-		deltaFileAccessMutex: &sync.Mutex{},
+		Identifier:          tbl,
+		ctx:                 ctx,
+		sleepBetweenBackups: time.Second * 3,
+		cfg:                 cfg,
+		dbCfg:               dbCfg,
+		tempDir:             path.Join(cfg.TempDir, tableDir),
+		finalDir:            path.Join(cfg.ArchiveDir, tableDir),
+		basebackupFilename:  "basebackup.copy",
+		infoFilename:        "info.yaml",
+		msgLen:              make([]byte, 8),
+		archiveFilesQueue:   queue.New(ctx),
+		segmentBufferMutex:  &sync.Mutex{},
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -125,12 +130,15 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 }
 
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
-	t.deltaFileAccessMutex.Lock()
-	defer t.deltaFileAccessMutex.Unlock()
-
-	if t.deltaCnt >= t.cfg.DeltasPerFile || t.currentDeltaFp == nil {
-		if err := t.createNewDeltaFile(lsn); err != nil {
-			return 0, fmt.Errorf("could not rotate file: %v", err)
+	t.segmentBufferMutex.Lock()
+	defer t.segmentBufferMutex.Unlock()
+	// should we switch to the new segment already?
+	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
+		if t.segmentFilename != "" {
+			// flush current buffer to the delta filename and archive it.
+			if err := t.writeSegmentToFile(); err != nil {
+				return 0, fmt.Errorf("could not save current message; %v", err)
+			}
 		}
 	}
 
@@ -163,7 +171,59 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	return ln, nil
 }
 
-// the archiver goroutine is responsible for moving complete files to the final backup directory
+func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
+	var err error
+	if _, err = t.segmentBuffer.Write(currentDelta); err != nil {
+		return fmt.Errorf("could not write current delta: %v", err)
+	}
+
+	t.deltaCnt++
+	t.deltasSinceBackupCnt++
+	t.lastWrittenMessage = time.Now()
+
+	return err
+}
+
+func (t *TableBackup) writeSegmentToFile() error {
+	deltaPath := path.Join(t.tempDir, t.segmentFilename)
+	fp, err := os.OpenFile(deltaPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaPath)
+	}
+	defer fp.Close()
+	if _, err = t.segmentBuffer.WriteTo(fp); err != nil {
+		return fmt.Errorf("could not write delta segment to a file %s: %v", deltaPath, err)
+	}
+	if t.cfg.Fsync {
+		// sync the file data itself
+		if err := syncFileAndDirectory(fp, deltaPath, t.tempDir); err != nil {
+			return err
+		}
+	}
+	log.Printf("stored current segment to disk file %s", deltaPath)
+	t.archiveFilesQueue.Put(t.segmentFilename)
+	return err
+}
+
+func (t *TableBackup) startNewSegment(startLSN uint64) {
+	t.segmentBuffer.Reset()
+	if startLSN != 0 {
+		t.setSegmentFilename(startLSN)
+
+		t.lastLSN = startLSN
+		t.segmentsCnt++
+	} else {
+		t.segmentFilename = ""
+	}
+	t.deltaCnt = 0
+}
+
+func (t *TableBackup) isCurrentSegmentEmpty() bool {
+	return t.segmentBuffer.Len() == 0
+}
+
+// the archiver goroutine is responsible for moving complete files to the final backup directory, as well as for closing
+// files in the temporary directory that didn't receive any writes for the specific amount of time (currently 3h)
 func (t *TableBackup) archiver() {
 	for {
 		select {
@@ -180,7 +240,7 @@ func (t *TableBackup) archiver() {
 					break
 				}
 				fname := obj.(string)
-				lsn := uint64(0)
+				lsn := invalidLSN
 				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
 					var err error
 					lsn, err = utils.GetLSNFromDeltaFilename(filename)
@@ -196,7 +256,7 @@ func (t *TableBackup) archiver() {
 						// a  code in RunBasebackup will take care of removing actual files from the temp directory
 						return false, nil
 					}
-					err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname))
+					err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname), t.cfg.Fsync)
 					return err != nil, err
 				}
 
@@ -222,21 +282,16 @@ func (t *TableBackup) janitor() {
 			if !t.triggerArchiveTimeoutOnTable() {
 				continue
 			}
-
-			t.deltaFileAccessMutex.Lock()
-			if err := t.currentDeltaFp.Close(); err != nil {
-				log.Printf("could not close %s due to inactivity: %v", t.currentDeltaFilename, err)
-				t.deltaFileAccessMutex.Unlock()
+			// TODO: move this to a method
+			t.segmentBufferMutex.Lock()
+			if err := t.writeSegmentToFile(); err != nil {
+				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
+				t.segmentBufferMutex.Unlock()
 				continue
 			}
-			t.currentDeltaFp = nil
-			// unlock as soon as possible, but no sooner than clearing up current delta file pointer and name
-			fname := t.currentDeltaFilename
-			t.currentDeltaFilename = ""
-			t.deltaFileAccessMutex.Unlock()
-
-			t.archiveFilesQueue.Put(fname)
-			log.Printf("archiving %s due to archiver timeout", fname)
+			log.Printf("archived %s due to archiver timeout", t.segmentFilename)
+			t.startNewSegment(invalidLSN)
+			t.segmentBufferMutex.Unlock()
 		}
 	}
 }
@@ -244,7 +299,7 @@ func (t *TableBackup) janitor() {
 // if we should archive the active non-empty delta due to the lack of activity on the table for a certain amount of time
 // TODO: make sure we don't have empty delta files opened in the first place and remove lastWrittenMessage.IsZero check.
 func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
-	return t.currentDeltaFp != nil &&
+	return !t.isCurrentSegmentEmpty() &&
 		!t.lastWrittenMessage.IsZero() &&
 		t.cfg.ArchiverTimeout > 0 &&
 		time.Since(t.lastWrittenMessage) > t.cfg.ArchiverTimeout
@@ -252,7 +307,7 @@ func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
 
 // archiveOneFile returns error only if the actual copy failed, so that we could retry it. In all other "unusual" cases
 // it just displays a cause and bails out.
-func archiveOneFile(sourceFile, destFile string) (err error) {
+func archiveOneFile(sourceFile, destFile string, fsync bool) (err error) {
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 		fmt.Printf("source file doesn't exist: %q; skipping", sourceFile)
 		return nil
@@ -268,7 +323,7 @@ func archiveOneFile(sourceFile, destFile string) (err error) {
 		}
 	}
 
-	if _, err := copyFile(sourceFile, destFile); err != nil {
+	if _, err := copyFile(sourceFile, destFile, fsync); err != nil {
 		os.Remove(destFile)
 		return fmt.Errorf("could not move %s -> %s file: %v", sourceFile, destFile, err)
 	}
@@ -276,6 +331,7 @@ func archiveOneFile(sourceFile, destFile string) (err error) {
 	if err := os.Remove(sourceFile); err != nil {
 		fmt.Printf("could not delete old file: %v", err)
 	}
+	log.Printf("successfully archived %s", destFile)
 	return nil
 }
 
@@ -378,6 +434,8 @@ func (t *TableBackup) hasRows() (bool, error) {
 }
 
 func (t *TableBackup) Truncate() error {
+	t.segmentBufferMutex.Lock()
+	defer t.segmentBufferMutex.Unlock()
 	if err := os.RemoveAll(t.tempDir); err != nil {
 		return fmt.Errorf("could not recreate table dir: %v", err)
 	}
@@ -386,9 +444,8 @@ func (t *TableBackup) Truncate() error {
 		return err
 	}
 
-	t.currentDeltaFp = nil
-	t.deltaCnt = 0
-	t.deltaFilesCnt = 0
+	t.startNewSegment(invalidLSN)
+	t.segmentsCnt = 0
 	t.filenamePostfix = 0
 
 	return nil
@@ -484,7 +541,23 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, er
 	return rel, nil
 }
 
-func copyFile(src, dst string) (int64, error) {
+func syncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
+	if err := fp.Sync(); err != nil {
+		return fmt.Errorf("could not sync file %s: %v", path, err)
+	}
+	// sync the directory entry
+	dP, err := os.Open(parentDirectoryName)
+	defer dP.Close()
+	if err != nil {
+		return fmt.Errorf("could not open directory %s to sync: %v", parentDirectoryName, err)
+	}
+	if err = dP.Sync(); err != nil {
+		return fmt.Errorf("could not sync directory %s: %v", err)
+	}
+	return nil
+}
+
+func copyFile(src, dst string, fsync bool) (int64, error) {
 	sourceFileStat, err := os.Stat(src)
 	if err != nil {
 		return 0, err
@@ -506,6 +579,15 @@ func copyFile(src, dst string) (int64, error) {
 	}
 	defer destination.Close()
 	nBytes, err := io.Copy(destination, source)
+	if err != nil {
+		return nBytes, fmt.Errorf("could not copy %s to %s: %v", err)
+	}
+	if fsync {
+		if err = syncFileAndDirectory(destination, dst, path.Dir(dst)); err != nil {
+			return nBytes, fmt.Errorf("could not sync %s: %v", dst, err)
+		}
+	}
 
-	return nBytes, err
+	return nBytes, nil
+
 }

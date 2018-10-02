@@ -1,7 +1,7 @@
 /*
 A GoRoutine safe queue.
 
-based on github.com/damnever/goqueue
+based on http://github.com/damnever/goqueue
 */
 
 package queue

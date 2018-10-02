@@ -161,8 +161,7 @@ func (t *TableBackup) RunBasebackup() error {
 	}
 
 	t.firstDeltaLSNToKeep = candidateLSN
-
-	t.archiveFiles <- t.infoFilename
+	t.archiveFilesQueue.Put(t.infoFilename)
 
 	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
 		t.String(),
@@ -343,8 +342,7 @@ func (t *TableBackup) copyDump() error {
 	if err := os.Rename(tempFilename, path.Join(t.tempDir, t.basebackupFilename)); err != nil {
 		return fmt.Errorf("could not move file: %v", err)
 	}
-
-	t.archiveFiles <- t.basebackupFilename
+	t.archiveFilesQueue.Put(t.basebackupFilename)
 
 	return nil
 }

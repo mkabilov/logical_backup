@@ -99,8 +99,8 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:                    ctx,
-		dbCfg:                  pgxConn,
+		ctx:   ctx,
+		dbCfg: pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		relations:              make(map[message.Identifier]message.Relation),
@@ -110,7 +110,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
-		stateFilename:          "state.yaml",
+		stateFilename:          "state.yaml", //TODO: move to the config file
 		cfg:                    cfg,
 		msgCnt:                 make(map[cmdType]int),
 		srv: http.Server{
@@ -377,7 +377,7 @@ func (b *LogicalBackup) startReplication() error {
 			}
 
 			if repMsg == nil {
-				log.Printf("receieved null replication message")
+				log.Printf("received null replication message")
 				continue
 			}
 

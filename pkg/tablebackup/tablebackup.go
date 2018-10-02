@@ -23,7 +23,6 @@ import (
 
 const (
 	dirPerms                 = os.ModePerm
-	archiverBuffer           = 100
 	deltasDirName            = "deltas"
 	maxArchiverRetryTimeout  = 5 * time.Second
 	maxArchiverRetryAttempts = 3
@@ -91,7 +90,7 @@ type TableBackup struct {
 	basebackupQueue *queue.Queue
 	msgLen          []byte
 
-	archiveFiles chan string // path relative to table dir
+	archiveFilesQueue *queue.Queue
 }
 
 func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
@@ -108,7 +107,7 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 		basebackupFilename:   "basebackup.copy",
 		infoFilename:         "info.yaml",
 		msgLen:               make([]byte, 8),
-		archiveFiles:         make(chan string, archiverBuffer),
+		archiveFilesQueue:    queue.New(ctx),
 		deltaFileAccessMutex: &sync.Mutex{},
 	}
 
@@ -118,6 +117,7 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 
 	tb.basebackupQueue = basebackupsQueue
 
+	go tb.janitor()
 	go tb.archiver()
 	go tb.periodicBackup()
 
@@ -163,59 +163,58 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	return ln, nil
 }
 
-// the archiver goroutine is responsible for moving complete files to the final backup directory, as well as for closing
-// files in the temporary directory that didn't receive any writes for the specific amount of time (currently 3h)
+// the archiver goroutine is responsible for moving complete files to the final backup directory
 func (t *TableBackup) archiver() {
-	closeCall := time.NewTicker(archiverCloseNapTime)
-	q := queue.New(t.ctx)
-
-	// worker routine to do the heavy-lifting
-	go func() {
-		for {
-			select {
-			case <-time.After(archiverWorkerNapTime):
-				for {
-					obj, err := q.Get()
+	for {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-time.After(archiverWorkerNapTime):
+			for {
+				obj, err := t.archiveFilesQueue.Get()
+				if err != nil {
+					if err == context.Canceled {
+						return
+					}
+					// the only other error we expect is that the queue is empty, in which case we go to sleep
+					break
+				}
+				fname := obj.(string)
+				lsn := uint64(0)
+				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
+					var err error
+					lsn, err = utils.GetLSNFromDeltaFilename(filename)
 					if err != nil {
-						if err == context.Canceled {
-							return
-						}
-						// the only other error we expect is that the queue is empty, in which case we go to sleep
-						break
+						log.Printf("could not decode lsn from the file name %s: %v", filename)
 					}
-					fname := obj.(string)
-					lsn := uint64(0)
-					if isDelta, filename := t.isDeltaFileName(fname); isDelta {
-						var err error
-						lsn, err = utils.GetLSNFromDeltaFilename(filename)
-						if err != nil {
-							log.Printf("could not decode lsn from the file name %s: %v", filename)
-						}
-					}
+				}
 
-					archiveAction := func() (bool, error) {
-						if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
-							log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
-								fname, pgx.FormatLSN(t.firstDeltaLSNToKeep))
-							// a  code in RunBasebackup will take care of removing actual files from the temp directory
-							return false, nil
-						}
-						err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname))
-						return err != nil, err
+				archiveAction := func() (bool, error) {
+					if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
+						log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
+							fname, pgx.FormatLSN(t.firstDeltaLSNToKeep))
+						// a  code in RunBasebackup will take care of removing actual files from the temp directory
+						return false, nil
 					}
+					err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname))
+					return err != nil, err
+				}
 
-					err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
-					if err != nil {
-						log.Printf("could not archive %s: %v", fname, err)
-					}
+				err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
+				if err != nil {
+					log.Printf("could not archive %s: %v", fname, err)
 				}
 			}
 		}
-	}()
+	}
+}
+
+// the janitor goroutine is responsible for closing files in the temporary directory
+// that didn't receive any writes for the specific amount of time (currently 3h)
+func (t *TableBackup) janitor() {
+	closeCall := time.NewTicker(archiverCloseNapTime)
 	for {
 		select {
-		case file := <-t.archiveFiles:
-			q.Put(file)
 		case <-t.ctx.Done():
 			closeCall.Stop()
 			return
@@ -223,6 +222,7 @@ func (t *TableBackup) archiver() {
 			if !t.triggerArchiveTimeoutOnTable() {
 				continue
 			}
+
 			t.deltaFileAccessMutex.Lock()
 			if err := t.currentDeltaFp.Close(); err != nil {
 				log.Printf("could not close %s due to inactivity: %v", t.currentDeltaFilename, err)
@@ -233,12 +233,10 @@ func (t *TableBackup) archiver() {
 			// unlock as soon as possible, but no sooner than clearing up current delta file pointer and name
 			fname := t.currentDeltaFilename
 			t.currentDeltaFilename = ""
-
 			t.deltaFileAccessMutex.Unlock()
 
-			q.Put(fname)
+			t.archiveFilesQueue.Put(fname)
 			log.Printf("archiving %s due to archiver timeout", fname)
-
 		}
 	}
 }
@@ -291,7 +289,7 @@ func (t *TableBackup) createNewDeltaFile(newLSN uint64) error {
 			return fmt.Errorf("could not close old file: %v", err)
 		}
 
-		t.archiveFiles <- t.currentDeltaFilename
+		t.archiveFilesQueue.Put(t.currentDeltaFilename)
 	}
 
 	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))

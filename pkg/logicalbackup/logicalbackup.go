@@ -497,9 +497,10 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			select c.oid,
 				   n.nspname,
 				   c.relname,
-       			   CASE
-         			WHEN csr.oid IS NULL AND c.relreplident IN ('d', 'n') THEN true
-         			ELSE false END AS has_replica_identity
+                   case
+                    when c.relreplident = 'n' or (c.relreplident = 'd' and csr.oid is null) then false
+                    else true
+                   end as has_replica_identity
 			from pg_class c
 				   join pg_namespace n on n.oid = c.relnamespace
        			   join pg_publication_tables pub on (c.relname = pub.tablename and n.nspname = pub.schemaname)

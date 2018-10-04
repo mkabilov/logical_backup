@@ -191,6 +191,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaPath)
 	}
 	defer fp.Close()
+
 	if _, err = t.segmentBuffer.WriteTo(fp); err != nil {
 		return fmt.Errorf("could not write delta segment to a file %s: %v", deltaPath, err)
 	}
@@ -202,6 +203,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 	}
 	log.Printf("stored current segment to disk file %s", deltaPath)
 	t.archiveFilesQueue.Put(t.segmentFilename)
+
 	return err
 }
 
@@ -545,6 +547,7 @@ func syncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
 	if err := fp.Sync(); err != nil {
 		return fmt.Errorf("could not sync file %s: %v", path, err)
 	}
+
 	// sync the directory entry
 	dP, err := os.Open(parentDirectoryName)
 	defer dP.Close()
@@ -554,6 +557,7 @@ func syncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
 	if err = dP.Sync(); err != nil {
 		return fmt.Errorf("could not sync directory %s: %v", err)
 	}
+
 	return nil
 }
 

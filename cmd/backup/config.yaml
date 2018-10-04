@@ -10,7 +10,7 @@ initialBasebackup: true
 fsync: true
 archiveDir: /tmp/final
 forceBasebackupAfterInactivityInterval: 24h
-archiverTimeout: 3m
+archiverTimeout: 3h
 db:
   host: 127.0.0.1
   port: 5432

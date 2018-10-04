@@ -13,6 +13,8 @@ import (
 )
 
 func main() {
+	defer log.Printf("successfully shut down")
+
 	ctx, done := context.WithCancel(context.Background())
 
 	if len(os.Args) < 2 {
@@ -58,14 +60,28 @@ func main() {
 
 loop:
 	for {
-		switch sig := <-sigs; sig {
-		case syscall.SIGINT:
-			fallthrough
-		case syscall.SIGTERM:
-			break loop
-		case syscall.SIGHUP:
-		default:
-			log.Printf("unhandled signal: %v", sig)
+		select {
+		case sig := <-sigs:
+			switch sig {
+			case syscall.SIGABRT:
+				fallthrough
+			case syscall.SIGINT:
+				fallthrough
+			case syscall.SIGQUIT:
+				fallthrough
+			case syscall.SIGSTOP:
+				fallthrough
+			case syscall.SIGTERM:
+				break loop
+			case syscall.SIGHUP:
+			default:
+				log.Printf("unhandled signal: %v", sig)
+			}
+		case <-lb.TerminationRequest:
+			{
+				log.Printf("received termination request, cleaning up...")
+				break loop
+			}
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"path"
+	"runtime"
 	"sync"
 	"time"
 
@@ -67,8 +68,9 @@ type LogicalBackup struct {
 	flushLSN       uint64
 	lastTxId       int32
 
-	basebackupQueue *queue.Queue
-	waitGr          *sync.WaitGroup
+	basebackupQueue    *queue.Queue
+	waitGr             *sync.WaitGroup
+	TerminationRequest chan struct{}
 
 	msgCnt       map[cmdType]int
 	bytesWritten uint64
@@ -99,8 +101,8 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:   ctx,
-		dbCfg: pgxConn,
+		ctx:                    ctx,
+		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		relations:              make(map[message.Identifier]message.Relation),
@@ -117,6 +119,8 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 			Addr:    fmt.Sprintf(":%d", 8080),                    // TODO: get rid of the hardcoded value
 			Handler: http.TimeoutHandler(mux, time.Second*5, ""), // TODO: get rid of the hardcoded value
 		},
+		// we don't want multiple routines trying to die at the same time to block
+		TerminationRequest: make(chan struct{}, 128),
 	}
 
 	if _, err := os.Stat(cfg.TempDir); os.IsNotExist(err) {
@@ -181,6 +185,17 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	return lb, nil
 }
 
+// die sends the request to cleanup and shutdown to the main thread, while terminating the current routine right away.
+func (lb *LogicalBackup) die(message string, args ...interface{}) {
+	log.Printf(message, args...)
+	// tell main to close the shop and go home
+	lb.TerminationRequest <- struct{}{}
+	// deferred waigroup increment will not be executed, do it now.
+	lb.waitGr.Done()
+	// terminate this goroutine a hard way
+	runtime.Goexit()
+}
+
 func (b *LogicalBackup) saveRawMessage(tableOID uint32, raw []byte) error {
 	var err error
 
@@ -238,7 +253,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
 
-						tb, tErr := tablebackup.New(b.ctx, b.cfg, tblName, b.dbCfg, b.basebackupQueue)
+						tb, tErr := tablebackup.New(b.ctx, b.waitGr, b.cfg, tblName, b.dbCfg, b.basebackupQueue)
 						if tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
@@ -345,14 +360,14 @@ func (b *LogicalBackup) sendStatus() error {
 	return nil
 }
 
-func (b *LogicalBackup) startReplication() error {
+func (b *LogicalBackup) startReplication() {
 	defer b.waitGr.Done()
 
 	log.Printf("Starting from %s lsn", pgx.FormatLSN(b.startLSN))
 
 	err := b.replConn.StartReplication(b.cfg.Slotname, b.startLSN, -1, b.pluginArgs...)
 	if err != nil {
-		log.Fatalf("failed to start replication: %s", err)
+		b.die("failed to start replication: %s", err)
 	}
 
 	ticker := time.NewTicker(b.statusTimeout)
@@ -360,10 +375,10 @@ func (b *LogicalBackup) startReplication() error {
 		select {
 		case <-b.ctx.Done():
 			ticker.Stop()
-			return nil
+			return
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
-				log.Fatalf("could not send status: %v", err)
+				b.die("could not send status: %v", err)
 			}
 		default:
 			wctx, cancel := context.WithTimeout(b.ctx, b.replMessageWaitTimeout)
@@ -372,8 +387,13 @@ func (b *LogicalBackup) startReplication() error {
 			if err == context.DeadlineExceeded {
 				continue
 			}
+			if err == context.Canceled {
+				log.Printf("received shutdown request: replication terminated")
+				break
+			}
+			// TODO: make sure we retry and cleanup after ourselves afterwards
 			if err != nil {
-				log.Fatalf("replication failed: %s", err)
+				b.die("replication failed: %v", err)
 			}
 
 			if repMsg == nil {
@@ -384,17 +404,17 @@ func (b *LogicalBackup) startReplication() error {
 			if repMsg.WalMessage != nil {
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
-					log.Fatalf("invalid pgoutput message: %s", err)
+					b.die("invalid pgoutput message: %s", err)
 				}
 				if err := b.handler(logmsg); err != nil {
-					log.Fatalf("error handling waldata: %s", err)
+					b.die("error handling waldata: %s", err)
 				}
 			}
 
 			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
 				log.Println("server wants a reply")
 				if err := b.sendStatus(); err != nil {
-					log.Fatalf("could not send status: %v", err)
+					b.die("could not send status: %v", err)
 				}
 			}
 		}
@@ -538,7 +558,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			log.Printf("set replica identity to full for table %s", fqtn)
 		}
 
-		tb, err := tablebackup.New(b.ctx, b.cfg, tab.t, b.dbCfg, b.basebackupQueue)
+		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, tab.t, b.dbCfg, b.basebackupQueue)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
@@ -651,7 +671,7 @@ func (b *LogicalBackup) Run() {
 
 	go func() {
 		if err2 := b.srv.ListenAndServe(); err2 != http.ErrServerClosed {
-			log.Fatalf("Could not start http server: %v", err2)
+			b.die("Could not start http server: %v", err2)
 		}
 	}()
 }

@@ -147,8 +147,8 @@ func (t *TableBackup) RunBasebackup() error {
 			pgx.FormatLSN(postBackupLSN), pgx.FormatLSN(backupLSN), pgx.FormatLSN(preBackupLSN))
 		// lookd like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
-			log.Fatalf("logical slot lsn %s points to an earlier location than the lsn of the latest delta created before the slot %s",
-				pgx.FormatLSN(backupLSN), pgx.FormatLSN(t.firstDeltaLSNToKeep))
+			log.Panic("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
+				t, pgx.FormatLSN(backupLSN), pgx.FormatLSN(t.firstDeltaLSNToKeep))
 		}
 		candidateLSN = preBackupLSN
 	}

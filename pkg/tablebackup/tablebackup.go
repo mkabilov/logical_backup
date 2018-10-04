@@ -51,7 +51,8 @@ type TableBaseBackup interface {
 type TableBackup struct {
 	message.Identifier
 
-	ctx context.Context
+	ctx  context.Context
+	wait *sync.WaitGroup
 
 	// Table info
 	oid uint32
@@ -97,12 +98,15 @@ type TableBackup struct {
 	archiveFilesQueue *queue.Queue
 }
 
-func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
+//TODO: maybe use oid instead of schema-name pair?
+func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.Identifier,
+	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) {
 	tableDir := utils.TableDir(tbl)
 
 	tb := TableBackup{
 		Identifier:          tbl,
 		ctx:                 ctx,
+		wait:                group,
 		sleepBetweenBackups: time.Second * 3,
 		cfg:                 cfg,
 		dbCfg:               dbCfg,
@@ -120,6 +124,8 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 	}
 
 	tb.basebackupQueue = basebackupsQueue
+
+	tb.wait.Add(3)
 
 	go tb.janitor()
 	go tb.archiver()
@@ -175,7 +181,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 	deltaPath := path.Join(t.tempDir, t.segmentFilename)
 	fp, err := os.OpenFile(deltaPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaPath)
+		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaPath, err)
 	}
 	defer fp.Close()
 
@@ -188,7 +194,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 			return err
 		}
 	}
-	log.Printf("stored current segment to disk file %s", deltaPath)
+	log.Printf("flushed current segment to disk file %s", deltaPath)
 	t.archiveFilesQueue.Put(t.segmentFilename)
 
 	return err
@@ -211,9 +217,40 @@ func (t *TableBackup) isCurrentSegmentEmpty() bool {
 	return t.segmentBuffer.Len() == 0
 }
 
+func (t *TableBackup) periodicBackup() {
+	defer t.wait.Done()
+	heartbeat := time.NewTicker(time.Minute)
+
+	for {
+		select {
+		case <-t.ctx.Done():
+			heartbeat.Stop()
+			return
+		case <-heartbeat.C:
+			// there must be some activity on the table and the backup threshold should be more than 0
+			if t.lastWrittenMessage.IsZero() ||
+				t.cfg.ForceBasebackupAfterInactivityInterval.Seconds() < 1 ||
+				t.deltasSinceBackupCnt == 0 ||
+				t.IsBasebackupPending() {
+				break
+			}
+
+			// do we need to create a new backup?
+			if time.Since(t.lastWrittenMessage) > t.cfg.ForceBasebackupAfterInactivityInterval {
+				log.Printf("last write to the table %s happened %v ago, new backup is queued",
+					t, time.Since(t.lastWrittenMessage).Truncate(1*time.Second))
+				t.SetBasebackupPending()
+				t.basebackupQueue.Put(t)
+			}
+		}
+	}
+}
+
 // the archiver goroutine is responsible for moving complete files to the final backup directory, as well as for closing
 // files in the temporary directory that didn't receive any writes for the specific amount of time (currently 3h)
 func (t *TableBackup) archiver() {
+	defer t.wait.Done()
+
 	for {
 		select {
 		case <-t.ctx.Done():
@@ -261,31 +298,40 @@ func (t *TableBackup) archiver() {
 // the janitor goroutine is responsible for closing files in the temporary directory
 // that didn't receive any writes for the specific amount of time (currently 3h)
 func (t *TableBackup) janitor() {
+	defer t.wait.Done()
+
 	closeCall := time.NewTicker(archiverCloseNapTime)
 	for {
 		select {
 		case <-t.ctx.Done():
 			closeCall.Stop()
+
+			if err := t.archiveCurrentSegment("shutdown"); err != nil {
+				log.Printf("could not write active changes to on shutdown: %v", err)
+			}
 			return
 		case <-closeCall.C:
 			if !t.triggerArchiveTimeoutOnTable() {
 				continue
 			}
-			t.segmentBufferMutex.Lock()
-			if err := t.archiveCurrentSegmentOnTimeout(); err != nil {
+			if err := t.archiveCurrentSegment("timeout"); err != nil {
 				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
 			}
-			t.segmentBufferMutex.Unlock()
 		}
 	}
 }
 
-func (t *TableBackup) archiveCurrentSegmentOnTimeout() error {
+func (t *TableBackup) archiveCurrentSegment(reason string) error {
+	t.segmentBufferMutex.Lock()
+	defer t.segmentBufferMutex.Unlock()
+	if t.segmentFilename == "" || t.deltaCnt == 0 {
+		return nil
+	}
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
 	}
-	log.Printf("archived %s due to archiver timeout", t.segmentFilename)
 	t.startNewSegment(invalidLSN)
+
 	return nil
 }
 
@@ -348,34 +394,6 @@ func (t *TableBackup) setSegmentFilename(newLSN uint64) {
 	}
 
 	t.segmentFilename = filename
-}
-
-func (t *TableBackup) periodicBackup() {
-	heartbeat := time.NewTicker(time.Minute)
-
-	for {
-		select {
-		case <-t.ctx.Done():
-			heartbeat.Stop()
-			return
-		case <-heartbeat.C:
-			// there must be some activity on the table and the backup threshold should be more than 0
-			if t.lastWrittenMessage.IsZero() ||
-				t.cfg.ForceBasebackupAfterInactivityInterval.Seconds() < 1 ||
-				t.deltasSinceBackupCnt == 0 ||
-				t.IsBasebackupPending() {
-				break
-			}
-
-			// do we need to create a new backup?
-			if time.Since(t.lastWrittenMessage) > t.cfg.ForceBasebackupAfterInactivityInterval {
-				log.Printf("last write to the table %s happened %v ago, new backup is queued",
-					t, time.Since(t.lastWrittenMessage).Truncate(1*time.Second))
-				t.SetBasebackupPending()
-				t.basebackupQueue.Put(t)
-			}
-		}
-	}
 }
 
 func (t *TableBackup) String() string {

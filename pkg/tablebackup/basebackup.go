@@ -133,7 +133,7 @@ func (t *TableBackup) RunBasebackup() error {
 		log.Printf("could not rename: %v", err)
 	}
 
-	// remove all deltas before this point, but keep the latest delta started before the backup, because it may
+	// remove all segmentBuffer before this point, but keep the latest delta started before the backup, because it may
 	// have changes happening after the backup has started. There is a slight race of a race condition, if a delta
 	// file gets rotated after creation of the slot but before the LSN to keep is recorded; to avoid that, we keep
 	// the LSN before and after the logical slot creation and, in case of their mismatch, take the latest delta
@@ -169,7 +169,7 @@ func (t *TableBackup) RunBasebackup() error {
 		pgx.FormatLSN(backupLSN),
 		pgx.FormatLSN(t.firstDeltaLSNToKeep))
 
-	// not that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
+	// not that the archiver has stopped archiving old segmentBuffer, we can purge them from both staging and final directories
 	for _, basedir := range []string{t.tempDir, t.finalDir} {
 		if err := t.PurgeObsoleteDeltaFiles(path.Join(basedir, deltasDirName)); err != nil {
 			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(basedir, deltasDirName), err)
@@ -229,7 +229,7 @@ func (t *TableBackup) tempSlotName() string {
 }
 
 func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
-	log.Printf("Purging deltas in %s before the lsn %s",
+	log.Printf("Purging segments in %s before the lsn %s",
 		deltasDir, pgx.FormatLSN(t.firstDeltaLSNToKeep))
 	fileList, err := ioutil.ReadDir(deltasDir)
 	if err != nil {

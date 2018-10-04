@@ -70,9 +70,8 @@ type TableBackup struct {
 
 	// Deltas
 	deltaCnt             int
-	deltaFilesCnt        int
+	segmentsCnt          int
 	deltasSinceBackupCnt int
-	filenamePostfix      uint32
 	lastLSN              uint64
 
 	segmentBufferMutex *sync.Mutex
@@ -140,33 +139,21 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 				return 0, fmt.Errorf("could not save current message; %v", err)
 			}
 		}
+		t.startNewSegment(lsn)
 	}
 
-	if t.deltaFilesCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
+	if t.segmentsCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
 		log.Printf("queueing base backup because we reached backupDeltaThreshold %s", t)
 		t.SetBasebackupPending()
 		t.basebackupQueue.Put(t)
 	}
 
-	t.deltaCnt++
-	t.deltasSinceBackupCnt++
-
 	ln := uint64(len(msg) + 8)
-
 	binary.BigEndian.PutUint64(t.msgLen, ln)
 
-	_, err := t.currentDeltaFp.Write(append(t.msgLen, msg...))
-	if err != nil {
-		return 0, fmt.Errorf("could not save delta: %v", err)
+	if err := t.appendDeltaToSegment(append(t.msgLen, msg...)); err != nil {
+		log.Printf("could not append delta to the current segment buffer: %v", err)
 	}
-
-	if t.cfg.Fsync {
-		if err := t.currentDeltaFp.Sync(); err != nil {
-			return 0, fmt.Errorf("could not fsync: %v", err)
-		}
-	}
-
-	t.lastWrittenMessage = time.Now()
 
 	return ln, nil
 }
@@ -338,19 +325,12 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) (err error) {
 }
 
 func (t *TableBackup) Files() int {
-	return t.deltaFilesCnt
+	return t.segmentsCnt
 }
 
-func (t *TableBackup) createNewDeltaFile(newLSN uint64) error {
-	if t.currentDeltaFp != nil {
-		if err := t.currentDeltaFp.Close(); err != nil {
-			return fmt.Errorf("could not close old file: %v", err)
-		}
-
-		t.archiveFilesQueue.Put(t.currentDeltaFilename)
-	}
-
+func (t *TableBackup) setSegmentFilename(newLSN uint64) {
 	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
+	// XXX: ignoring os.stat errors outside of 'file already exists'
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
 		t.filenamePostfix++
 	} else {
@@ -361,18 +341,7 @@ func (t *TableBackup) createNewDeltaFile(newLSN uint64) error {
 		filename = fmt.Sprintf("%s.%x", filename, t.filenamePostfix)
 	}
 
-	fp, err := os.OpenFile(path.Join(t.tempDir, filename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return err
-	}
-	t.currentDeltaFp = fp
-
-	t.currentDeltaFilename = filename
-	t.lastLSN = newLSN
-	t.deltaFilesCnt++
-	t.deltaCnt = 0
-
-	return nil
+	t.segmentFilename = filename
 }
 
 func (t *TableBackup) periodicBackup() {

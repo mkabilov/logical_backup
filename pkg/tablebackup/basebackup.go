@@ -99,11 +99,11 @@ func (t *TableBackup) RunBasebackup() error {
 		if hasRows, err := t.hasRows(); err != nil {
 			return true, fmt.Errorf("could not check if table has rows: %v", err)
 		} else if !hasRows {
-			log.Printf("table %s seems to have no rows; skipping", t.Identifier)
+			log.Printf("table %s seems to have no rows; skipping", t.NamespacedName)
 			return true, nil
 		}
 
-		relationInfo, err = FetchRelationInfo(t.tx, t.Identifier)
+		relationInfo, err = FetchRelationInfo(t.tx, t.NamespacedName)
 		if err != nil {
 			return true, fmt.Errorf("could not fetch table struct: %v", err)
 		}
@@ -253,7 +253,7 @@ func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
 }
 
 func (t *TableBackup) lockTable() error {
-	if _, err := t.tx.Exec(fmt.Sprintf("LOCK TABLE %s IN ACCESS SHARE MODE", t.Identifier.Sanitize())); err != nil {
+	if _, err := t.tx.Exec(fmt.Sprintf("LOCK TABLE %s IN ACCESS SHARE MODE", t.NamespacedName.Sanitize())); err != nil {
 		return fmt.Errorf("could not lock the table: %v", err)
 	}
 
@@ -331,7 +331,7 @@ func (t *TableBackup) copyDump() error {
 	}
 	defer fp.Close()
 
-	if err := t.tx.CopyToWriter(fp, fmt.Sprintf("copy %s to stdout", t.Identifier.Sanitize())); err != nil {
+	if err := t.tx.CopyToWriter(fp, fmt.Sprintf("copy %s to stdout", t.NamespacedName.Sanitize())); err != nil {
 		if err2 := t.txRollback(); err2 != nil {
 			os.Remove(tempFilename)
 			return fmt.Errorf("could not copy and rollback tx: %v, %v", err2, err)

@@ -68,7 +68,7 @@ type DMLMessage struct {
 	Query       string
 }
 
-type Identifier struct {
+type NamespacedName struct {
 	Namespace string
 	Name      string
 }
@@ -88,7 +88,7 @@ type Tuple struct {
 
 type Begin struct {
 	Raw       []byte
-	FinalLSN  uint64    // The final LastLSN of the transaction.
+	FinalLSN  uint64    // LSN of the record that lead to this xact to be committed
 	Timestamp time.Time // Commit timestamp of the transaction
 	XID       int32     // Xid of the transaction.
 }
@@ -97,8 +97,8 @@ type Commit struct {
 	Raw            []byte
 	Flags          uint8     // Flags; currently unused (must be 0)
 	LSN            uint64    // The LastLSN of the commit.
-	TransactionLSN uint64    // The end LastLSN of the transaction.
-	Timestamp      time.Time // Commit timestamp of the transaction.
+	TransactionLSN uint64    // LSN pointing to the end of the commit record + 1
+	Timestamp      time.Time // Commit timestamp of the transaction
 }
 
 type Origin struct {
@@ -108,7 +108,8 @@ type Origin struct {
 }
 
 type Relation struct {
-	Identifier
+	NamespacedName
+
 	Raw             []byte
 	OID             uint32          // OID of the relation.
 	ReplicaIdentity ReplicaIdentity // Replica identity
@@ -376,10 +377,10 @@ func (t TupleKind) String() string {
 	return "unknown"
 }
 
-func (i Identifier) String() string {
+func (i NamespacedName) String() string {
 	return pgx.Identifier{i.Namespace, i.Name}.Sanitize()
 }
 
-func (i Identifier) Sanitize() string {
+func (i NamespacedName) Sanitize() string {
 	return pgx.Identifier{i.Namespace, i.Name}.Sanitize()
 }

@@ -25,6 +25,8 @@ import (
 const (
 	dirPerms                        = os.ModePerm
 	deltasDirName                   = "deltas"
+	basebackupFilename              = "basebackup.copy"
+	tableInfoFilename               = "info.yaml"
 	maxArchiverRetryTimeout         = 5 * time.Second
 	maxArchiverRetryAttempts        = 3
 	archiverWorkerNapTime           = 500 * time.Millisecond
@@ -49,7 +51,7 @@ type TableBaseBackup interface {
 }
 
 type TableBackup struct {
-	message.Identifier
+	message.NamespacedName
 
 	ctx  context.Context
 	wait *sync.WaitGroup
@@ -99,12 +101,12 @@ type TableBackup struct {
 }
 
 //TODO: maybe use oid instead of schema-name pair?
-func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.Identifier,
+func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName,
 	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) {
 	tableDir := utils.TableDir(tbl)
 
 	tb := TableBackup{
-		Identifier:          tbl,
+		NamespacedName:      tbl,
 		ctx:                 ctx,
 		wait:                group,
 		sleepBetweenBackups: time.Second * 3,
@@ -112,8 +114,8 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 		dbCfg:               dbCfg,
 		tempDir:             path.Join(cfg.TempDir, tableDir),
 		finalDir:            path.Join(cfg.ArchiveDir, tableDir),
-		basebackupFilename:  "basebackup.copy",
-		infoFilename:        "info.yaml",
+		basebackupFilename:  basebackupFilename,
+		infoFilename:        tableInfoFilename,
 		msgLen:              make([]byte, 8),
 		archiveFilesQueue:   queue.New(ctx),
 		segmentBufferMutex:  &sync.Mutex{},
@@ -137,6 +139,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
+
 	// should we switch to the new segment already?
 	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
 		if t.segmentFilename != "" {
@@ -188,6 +191,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 	if _, err = t.segmentBuffer.WriteTo(fp); err != nil {
 		return fmt.Errorf("could not write delta segment to a file %s: %v", deltaPath, err)
 	}
+
 	if t.cfg.Fsync {
 		// sync the file data itself
 		if err := syncFileAndDirectory(fp, deltaPath, t.tempDir); err != nil {
@@ -324,9 +328,11 @@ func (t *TableBackup) janitor() {
 func (t *TableBackup) archiveCurrentSegment(reason string) error {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
+
 	if t.segmentFilename == "" || t.deltaCnt == 0 {
 		return nil
 	}
+
 	log.Printf("writing and archiving current segment to %s due to the %s", t.segmentFilename, reason)
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
@@ -349,7 +355,7 @@ func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
 // it just displays a cause and bails out.
 func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
-		fmt.Printf("source file doesn't exist: %q; skipping", sourceFile)
+		log.Printf("source file doesn't exist: %q; skipping", sourceFile)
 		return nil
 	}
 
@@ -357,9 +363,8 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 		if st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
-			fmt.Printf("destination file is not empty %q; skipping", destFile)
+			log.Printf("destination file is not empty %q; skipping", destFile)
 			return nil
-
 		}
 	} else if err != nil {
 		return fmt.Errorf("could not stat %s: %v", destFile, err)
@@ -371,8 +376,9 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	}
 
 	if err := os.Remove(sourceFile); err != nil {
-		fmt.Printf("could not delete old file: %v", err)
+		log.Printf("could not delete old file: %v", err)
 	}
+
 	log.Printf("successfully archived %s", destFile)
 	return nil
 }
@@ -398,7 +404,7 @@ func (t *TableBackup) setSegmentFilename(newLSN uint64) {
 }
 
 func (t *TableBackup) String() string {
-	return t.Identifier.String()
+	return t.NamespacedName.String()
 }
 
 func (t *TableBackup) createDirs() error {
@@ -423,7 +429,7 @@ func (t *TableBackup) createDirs() error {
 func (t *TableBackup) hasRows() (bool, error) {
 	var hasRows bool
 
-	row := t.conn.QueryRow(fmt.Sprintf("select exists(select 1 from %s)", t.Identifier.Sanitize()))
+	row := t.conn.QueryRow(fmt.Sprintf("select exists(select 1 from %s)", t.NamespacedName.Sanitize()))
 	err := row.Scan(&hasRows)
 
 	return hasRows, err
@@ -464,26 +470,35 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 		}
 		finalPos++
 	}
+
 	if finalPos != 16 {
 		return false, name
 	}
+
 	if len(fields) < 2 {
 		return true, file
 	}
+
 	if len(fields) == 2 {
 		for _, ch := range fields[1] {
 			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
 				return false, name
 			}
 		}
+
 		return true, file
 	}
-	return false, name
 
+	return false, name
 }
 
-func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, error) {
-	var rel message.Relation
+func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation, error) {
+	var (
+		rel            message.Relation
+		relOid         uint32
+		relRepIdentity pgtype.BPChar
+	)
+
 	row := tx.QueryRow(`
 		SELECT c.oid, c.relreplident 
 		FROM pg_catalog.pg_class c
@@ -491,9 +506,6 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, er
 		WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`,
 		tbl.Namespace,
 		tbl.Name)
-
-	var relOid uint32
-	var relRepIdentity pgtype.BPChar
 
 	if err := row.Scan(&relOid, &relRepIdentity); err != nil {
 		return rel, fmt.Errorf("could not fetch table info: %v", err)
@@ -576,10 +588,12 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 		return 0, err
 	}
 	defer destination.Close()
+
 	nBytes, err := io.Copy(destination, source)
 	if err != nil {
 		return nBytes, fmt.Errorf("could not copy %s to %s: %v", err)
 	}
+
 	if fsync {
 		if err = syncFileAndDirectory(destination, dst, path.Dir(dst)); err != nil {
 			return nBytes, fmt.Errorf("could not sync %s: %v", dst, err)
@@ -587,5 +601,4 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 	}
 
 	return nBytes, nil
-
 }

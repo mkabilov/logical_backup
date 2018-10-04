@@ -37,6 +37,11 @@ const (
 	cDelete
 )
 
+type StateInfo struct {
+	Timestamp  time.Time
+	CurrentLSN string
+}
+
 type LogicalBackuper interface {
 	Run()
 	Wait()
@@ -58,8 +63,8 @@ type LogicalBackup struct {
 	replMessageWaitTimeout time.Duration
 	statusTimeout          time.Duration
 
-	relations     map[message.Identifier]message.Relation
-	relationNames map[uint32]message.Identifier
+	relations     map[message.NamespacedName]message.Relation
+	relationNames map[uint32]message.NamespacedName
 	types         map[uint32]message.Type
 
 	storedFlushLSN uint64
@@ -100,13 +105,13 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:                    ctx,
-		stopCh:                 stopCh,
-		dbCfg:                  pgxConn,
+		ctx:    ctx,
+		stopCh: stopCh,
+		dbCfg:  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
-		relations:              make(map[message.Identifier]message.Relation),
-		relationNames:          make(map[uint32]message.Identifier),
+		relations:              make(map[message.NamespacedName]message.Relation),
+		relationNames:          make(map[uint32]message.NamespacedName),
 		types:                  make(map[uint32]message.Type),
 		backupTables:           make(map[uint32]tablebackup.TableBackuper),
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
@@ -133,7 +138,8 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	}
 	defer conn.Close()
 
-	log.Printf("My PID: %d", conn.PID())
+	//TODO: switch to more sophisticated logger and display pid only if in debug mode
+	log.Printf("Pg backend session PID: %d", conn.PID())
 
 	if err := lb.initPublication(conn); err != nil {
 		return nil, err
@@ -183,9 +189,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	return lb, nil
 }
 
-func (b *LogicalBackup) saveRawMessage(tableOID uint32, raw []byte) error {
-	var err error
-
+func (b *LogicalBackup) saveTableMessage(tableOID uint32, msg []byte) error {
 	bt, ok := b.backupTables[tableOID]
 	if !ok {
 		log.Printf("table is not tracked %s", b.relationNames[tableOID])
@@ -212,7 +216,7 @@ func (b *LogicalBackup) saveRawMessage(tableOID uint32, raw []byte) error {
 		b.typeMsg = nil
 	}
 
-	ln, err := bt.SaveRawMessage(raw, b.flushLSN)
+	ln, err := bt.SaveRawMessage(msg, b.flushLSN)
 	if err != nil {
 		return fmt.Errorf("could not save message: %v", err)
 	}
@@ -227,33 +231,32 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 	switch v := m.(type) {
 	case message.Relation:
-		tblName := message.Identifier{Namespace: v.Namespace, Name: v.Name}
-		if oldRel, ok := b.relations[tblName]; !ok { // new table or renamed
+		if oldRel, ok := b.relations[v.NamespacedName]; !ok { // new table or renamed
 			if oldTblName, ok := b.relationNames[v.OID]; ok { // renamed table
-				log.Printf("table was renamed %s -> %s", oldTblName, tblName)
+				log.Printf("table was renamed %s -> %s", oldTblName, v.NamespacedName)
 				delete(b.relations, oldTblName)
 				delete(b.relationNames, v.OID)
 
-				err = b.saveRawMessage(v.OID, v.Raw)
+				err = b.saveTableMessage(v.OID, v.Raw)
 			} else { // new table
 				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
 					if b.cfg.TrackNewTables {
-						log.Printf("new table %s", tblName)
+						log.Printf("new table %s", v.NamespacedName)
 
-						tb, tErr := tablebackup.New(b.ctx, b.waitGr, b.cfg, tblName, b.dbCfg, b.basebackupQueue)
+						tb, tErr := tablebackup.New(b.ctx, b.waitGr, b.cfg, v.NamespacedName, b.dbCfg, b.basebackupQueue)
 						if tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
 							b.backupTables[v.OID] = tb
 						}
 					} else {
-						log.Printf("skipping new table %s due to trackNewTables = false", tblName)
+						log.Printf("skipping new table %s due to trackNewTables = false", v.NamespacedName)
 					}
 				}
 			}
 		} else { // existing table
 			if oldRel.OID != v.OID { // dropped and created again
-				log.Printf("table was dropped and created again %s", tblName)
+				log.Printf("table was dropped and created again %s", v.NamespacedName)
 				bt, ok := b.backupTables[oldRel.OID]
 				if !ok {
 					// table is not tracked — skip it
@@ -263,24 +266,24 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 				b.backupTables[v.OID] = b.backupTables[oldRel.OID]
 			} else {
-				err = b.saveRawMessage(v.OID, v.Raw)
+				err = b.saveTableMessage(v.OID, v.Raw)
 			}
 		}
 
-		b.relations[tblName] = v
-		b.relationNames[v.OID] = tblName
+		b.relations[v.NamespacedName] = v
+		b.relationNames[v.OID] = v.NamespacedName
 	case message.Insert:
 		b.msgCnt[cInsert]++
 
-		err = b.saveRawMessage(v.RelationOID, v.Raw)
+		err = b.saveTableMessage(v.RelationOID, v.Raw)
 	case message.Update:
 		b.msgCnt[cUpdate]++
 
-		err = b.saveRawMessage(v.RelationOID, v.Raw)
+		err = b.saveTableMessage(v.RelationOID, v.Raw)
 	case message.Delete:
 		b.msgCnt[cDelete]++
 
-		err = b.saveRawMessage(v.RelationOID, v.Raw)
+		err = b.saveTableMessage(v.RelationOID, v.Raw)
 	case message.Begin:
 		b.lastTxId = v.XID
 		b.flushLSN = v.FinalLSN
@@ -432,6 +435,10 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 	if rows.Next() {
 		var lsnString, slotType, database string
 
+		if err := rows.Err(); err != nil {
+			return false, fmt.Errorf("could not execute query: %v", err)
+		}
+
 		slotExists = true
 		if err := rows.Scan(&lsnString, &slotType, &database); err != nil {
 			return false, fmt.Errorf("could not scan lsn: %v", err)
@@ -457,7 +464,8 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 
 func (b *LogicalBackup) createSlot(conn *pgx.Conn) (uint64, error) {
 	var strLSN sql.NullString
-	row := conn.QueryRowEx(b.ctx, "select lsn from pg_create_logical_replication_slot($1, $2)", nil, b.cfg.Slotname, outputPlugin)
+	row := conn.QueryRowEx(b.ctx, "select lsn from pg_create_logical_replication_slot($1, $2)",
+		nil, b.cfg.Slotname, outputPlugin)
 
 	if err := row.Scan(&strLSN); err != nil {
 		return 0, fmt.Errorf("could not scan: %v", err)
@@ -509,7 +517,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	// replica identity full for them
 	type tableInfo struct {
 		oid             uint32
-		name            message.Identifier
+		name            message.NamespacedName
 		hasPK           bool
 		replicaIdentity message.ReplicaIdentity
 	}
@@ -585,10 +593,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 }
 
 func (b *LogicalBackup) readRestartLSN() (uint64, error) {
-	var (
-		ts     time.Time
-		LSNstr string
-	)
+	var stateInfo StateInfo
 
 	stateFilename := path.Join(b.cfg.TempDir, b.stateFilename)
 	if _, err := os.Stat(stateFilename); os.IsNotExist(err) {
@@ -601,21 +606,20 @@ func (b *LogicalBackup) readRestartLSN() (uint64, error) {
 	}
 	defer fp.Close()
 
-	yaml.NewDecoder(fp).Decode(&struct {
-		Timestamp  *time.Time
-		CurrentLSN *string
-	}{&ts, &LSNstr})
+	if err := yaml.NewDecoder(fp).Decode(&stateInfo); err != nil {
+		return 0, fmt.Errorf("could not decode state info yaml: %v", err)
+	}
 
-	currentLSN, err := pgx.ParseLSN(LSNstr)
+	currentLSN, err := pgx.ParseLSN(stateInfo.CurrentLSN)
 	if err != nil {
-		return 0, fmt.Errorf("could not parse %q LSN string: %v", LSNstr, err)
+		return 0, fmt.Errorf("could not parse %q LSN string: %v", stateInfo.CurrentLSN, err)
 	}
 
 	return currentLSN, nil
 }
 
 func (b *LogicalBackup) storeRestartLSN() error {
-	//TODO: I'm ugly, refactor me
+	//TODO: I'm ugly, refactor me >_<
 
 	fp, err := os.OpenFile(path.Join(b.cfg.TempDir, b.stateFilename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
@@ -629,23 +633,20 @@ func (b *LogicalBackup) storeRestartLSN() error {
 	}
 	defer fpArchive.Close()
 
-	err = yaml.NewEncoder(fp).Encode(struct {
-		Timestamp  time.Time
-		CurrentLSN string
-	}{time.Now(), pgx.FormatLSN(b.flushLSN)})
-	if err != nil {
-		return fmt.Errorf("could not save current lsn: %v", err)
+	stateInfo := StateInfo{
+		Timestamp:  time.Now(),
+		CurrentLSN: pgx.FormatLSN(b.flushLSN),
 	}
-	fp.Sync()
 
-	err = yaml.NewEncoder(fpArchive).Encode(struct {
-		Timestamp  time.Time
-		CurrentLSN string
-	}{time.Now(), pgx.FormatLSN(b.flushLSN)})
-	if err != nil {
+	if err := yaml.NewEncoder(fp).Encode(stateInfo); err != nil {
 		return fmt.Errorf("could not save current lsn: %v", err)
 	}
-	fpArchive.Sync()
+	fp.Sync() //TODO: fsync dir as well
+
+	if err := yaml.NewEncoder(fpArchive).Encode(stateInfo); err != nil {
+		return fmt.Errorf("could not save current lsn: %v", err)
+	}
+	fpArchive.Sync() //TODO: fsync dir as well
 
 	return nil
 }
@@ -663,6 +664,7 @@ func (b *LogicalBackup) BackgroundBasebackuper() {
 		if err := t.RunBasebackup(); err != nil && err != context.Canceled {
 			log.Printf("could not basebackup %s: %v", t, err)
 		}
+
 		// from now on we can schedule new basebackups on that table
 		t.ClearBasebackupPending()
 	}

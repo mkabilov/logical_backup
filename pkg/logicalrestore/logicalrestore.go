@@ -70,7 +70,7 @@ type LogicalRestorer interface {
 }
 
 type LogicalRestore struct {
-	message.Identifier
+	message.NamespacedName
 
 	startLSN    uint64
 	columnNames []string
@@ -86,10 +86,10 @@ type LogicalRestore struct {
 
 func New(schemaName, tableName, dir string, cfg pgx.ConnConfig) *LogicalRestore {
 	return &LogicalRestore{
-		ctx:        context.Background(),
-		baseDir:    dir,
-		cfg:        cfg,
-		Identifier: message.Identifier{Namespace: schemaName, Name: tableName},
+		ctx:            context.Background(),
+		baseDir:        dir,
+		cfg:            cfg,
+		NamespacedName: message.NamespacedName{Namespace: schemaName, Name: tableName},
 	}
 }
 
@@ -153,15 +153,15 @@ func (r *LogicalRestore) rollback() error {
 }
 
 func (r *LogicalRestore) infoFilepath() string {
-	return path.Join(r.baseDir, utils.TableDir(r.Identifier), "info.yaml")
+	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName), "info.yaml")
 }
 
 func (r *LogicalRestore) dumpFilepath() string {
-	return path.Join(r.baseDir, utils.TableDir(r.Identifier), "basebackup.copy")
+	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName), "basebackup.copy")
 }
 
 func (r *LogicalRestore) deltaDir() string {
-	return path.Join(r.baseDir, utils.TableDir(r.Identifier), "deltas")
+	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName), "deltas")
 }
 
 func (r *LogicalRestore) loadInfo() error {
@@ -198,7 +198,7 @@ func (r *LogicalRestore) loadDump() error {
 	}
 	defer fp.Close()
 
-	if err := r.conn.CopyFromReader(fp, fmt.Sprintf("copy %s from stdin", r.Identifier.Sanitize())); err != nil {
+	if err := r.conn.CopyFromReader(fp, fmt.Sprintf("copy %s from stdin", r.NamespacedName.Sanitize())); err != nil {
 		return fmt.Errorf("could not copy: %v", err)
 	}
 
@@ -297,7 +297,7 @@ func (r *LogicalRestore) applyDeltas() error {
 }
 
 func (r *LogicalRestore) checkTableStruct() error {
-	relationInfo, err := tablebackup.FetchRelationInfo(r.tx, r.Identifier)
+	relationInfo, err := tablebackup.FetchRelationInfo(r.tx, r.NamespacedName)
 	if err != nil {
 		return fmt.Errorf("could not fetch table info: %v", err)
 	}

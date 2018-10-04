@@ -11,7 +11,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
-func TableDir(tbl message.Identifier) string {
+func TableDir(tbl message.NamespacedName) string {
 	tblHash := fmt.Sprintf("%x", md5.Sum([]byte(tbl.Sanitize())))
 
 	// TODO: consider removing tblHash altogether to shorten the path

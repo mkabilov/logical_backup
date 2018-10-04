@@ -327,6 +327,7 @@ func (t *TableBackup) archiveCurrentSegment(reason string) error {
 	if t.segmentFilename == "" || t.deltaCnt == 0 {
 		return nil
 	}
+	log.Printf("writing and archiving current segment to %s due to the %s", t.segmentFilename, reason)
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
 	}

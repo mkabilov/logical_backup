@@ -9,7 +9,6 @@ import (
 	"net/http/pprof"
 	"os"
 	"path"
-	"runtime"
 	"sync"
 	"time"
 
@@ -184,17 +183,6 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	return lb, nil
 }
 
-// die sends the request to cleanup and shutdown to the main thread, while terminating the current routine right away.
-func (lb *LogicalBackup) die(message string, args ...interface{}) {
-	log.Printf(message, args...)
-	// tell main to close the shop and go home
-	lb.stopCh <- struct{}{}
-	// deferred waigroup increment will not be executed, do it now.
-	lb.waitGr.Done()
-	// terminate this goroutine a hard way
-	runtime.Goexit()
-}
-
 func (b *LogicalBackup) saveRawMessage(tableOID uint32, raw []byte) error {
 	var err error
 
@@ -366,7 +354,9 @@ func (b *LogicalBackup) startReplication() {
 
 	err := b.replConn.StartReplication(b.cfg.Slotname, b.startLSN, -1, b.pluginArgs...)
 	if err != nil {
-		b.die("failed to start replication: %s", err)
+		log.Printf("failed to start replication: %s", err)
+		b.stopCh <- struct{}{}
+		return
 	}
 
 	ticker := time.NewTicker(b.statusTimeout)
@@ -377,7 +367,9 @@ func (b *LogicalBackup) startReplication() {
 			return
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
-				b.die("could not send status: %v", err)
+				log.Printf("could not send status: %v", err)
+				b.stopCh <- struct{}{}
+				return
 			}
 		default:
 			wctx, cancel := context.WithTimeout(b.ctx, b.replMessageWaitTimeout)
@@ -392,7 +384,9 @@ func (b *LogicalBackup) startReplication() {
 			}
 			// TODO: make sure we retry and cleanup after ourselves afterwards
 			if err != nil {
-				b.die("replication failed: %v", err)
+				log.Printf("replication failed: %v", err)
+				b.stopCh <- struct{}{}
+				return
 			}
 
 			if repMsg == nil {
@@ -403,17 +397,23 @@ func (b *LogicalBackup) startReplication() {
 			if repMsg.WalMessage != nil {
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
-					b.die("invalid pgoutput message: %s", err)
+					log.Printf("invalid pgoutput message: %s", err)
+					b.stopCh <- struct{}{}
+					return
 				}
 				if err := b.handler(logmsg); err != nil {
-					b.die("error handling waldata: %s", err)
+					log.Printf("error handling waldata: %s", err)
+					b.stopCh <- struct{}{}
+					return
 				}
 			}
 
 			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
 				log.Println("server wants a reply")
 				if err := b.sendStatus(); err != nil {
-					b.die("could not send status: %v", err)
+					log.Printf("could not send status: %v", err)
+					b.stopCh <- struct{}{}
+					return
 				}
 			}
 		}
@@ -688,7 +688,9 @@ func (b *LogicalBackup) Run() {
 
 	go func() {
 		if err2 := b.srv.ListenAndServe(); err2 != http.ErrServerClosed {
-			b.die("Could not start http server: %v", err2)
+			log.Printf("Could not start http server: %v", err2)
+			b.stopCh <- struct{}{}
+			return
 		}
 	}()
 }

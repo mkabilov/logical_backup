@@ -271,18 +271,22 @@ func (t *TableBackup) janitor() {
 			if !t.triggerArchiveTimeoutOnTable() {
 				continue
 			}
-			// TODO: move this to a method
 			t.segmentBufferMutex.Lock()
-			if err := t.writeSegmentToFile(); err != nil {
+			if err := t.archiveCurrentSegmentOnTimeout(); err != nil {
 				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
-				t.segmentBufferMutex.Unlock()
-				continue
 			}
-			log.Printf("archived %s due to archiver timeout", t.segmentFilename)
-			t.startNewSegment(invalidLSN)
 			t.segmentBufferMutex.Unlock()
 		}
 	}
+}
+
+func (t *TableBackup) archiveCurrentSegmentOnTimeout() error {
+	if err := t.writeSegmentToFile(); err != nil {
+		return err
+	}
+	log.Printf("archived %s due to archiver timeout", t.segmentFilename)
+	t.startNewSegment(invalidLSN)
+	return nil
 }
 
 // if we should archive the active non-empty delta due to the lack of activity on the table for a certain amount of time
@@ -296,7 +300,7 @@ func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
 
 // archiveOneFile returns error only if the actual copy failed, so that we could retry it. In all other "unusual" cases
 // it just displays a cause and bails out.
-func archiveOneFile(sourceFile, destFile string, fsync bool) (err error) {
+func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 		fmt.Printf("source file doesn't exist: %q; skipping", sourceFile)
 		return nil
@@ -310,6 +314,8 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) (err error) {
 			return nil
 
 		}
+	} else if err != nil {
+		return fmt.Errorf("could not stat %s: %v", destFile, err)
 	}
 
 	if _, err := copyFile(sourceFile, destFile, fsync); err != nil {

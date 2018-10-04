@@ -7,7 +7,7 @@ slotname: myslot
 publication: mypub
 sendStatusOnCommit: false
 initialBasebackup: true
-fsync: false
+fsync: true
 archiveDir: /tmp/final
 forceBasebackupAfterInactivityInterval: 24h
 archiverTimeout: 3h

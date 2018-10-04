@@ -1,6 +1,7 @@
 package tablebackup
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -22,12 +23,13 @@ import (
 )
 
 const (
-	dirPerms                 = os.ModePerm
-	deltasDirName            = "deltas"
-	maxArchiverRetryTimeout  = 5 * time.Second
-	maxArchiverRetryAttempts = 3
-	archiverWorkerNapTime    = 500 * time.Millisecond
-	archiverCloseNapTime     = 10 * time.Minute
+	dirPerms                        = os.ModePerm
+	deltasDirName                   = "deltas"
+	maxArchiverRetryTimeout         = 5 * time.Second
+	maxArchiverRetryAttempts        = 3
+	archiverWorkerNapTime           = 500 * time.Millisecond
+	archiverCloseNapTime            = 1 * time.Minute
+	invalidLSN               uint64 = 0
 )
 
 type TableBackuper interface {
@@ -49,7 +51,8 @@ type TableBaseBackup interface {
 type TableBackup struct {
 	message.Identifier
 
-	ctx context.Context
+	ctx  context.Context
+	wait *sync.WaitGroup
 
 	// Table info
 	oid uint32
@@ -68,14 +71,16 @@ type TableBackup struct {
 
 	// Deltas
 	deltaCnt             int
-	deltaFilesCnt        int
+	segmentsCnt          int
 	deltasSinceBackupCnt int
-	filenamePostfix      uint32
 	lastLSN              uint64
 
-	currentDeltaFp       *os.File
-	deltaFileAccessMutex *sync.Mutex
-	currentDeltaFilename string
+	segmentBufferMutex *sync.Mutex
+	segmentFilename    string
+	filenamePostfix    uint32
+
+	// buffer for the current delta segment
+	segmentBuffer bytes.Buffer
 
 	// Basebackup
 	firstDeltaLSNToKeep uint64
@@ -93,22 +98,25 @@ type TableBackup struct {
 	archiveFilesQueue *queue.Queue
 }
 
-func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) { //TODO: maybe use oid instead of schema-name pair?
+//TODO: maybe use oid instead of schema-name pair?
+func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.Identifier,
+	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) {
 	tableDir := utils.TableDir(tbl)
 
 	tb := TableBackup{
-		Identifier:           tbl,
-		ctx:                  ctx,
-		sleepBetweenBackups:  time.Second * 3,
-		cfg:                  cfg,
-		dbCfg:                dbCfg,
-		tempDir:              path.Join(cfg.TempDir, tableDir),
-		finalDir:             path.Join(cfg.ArchiveDir, tableDir),
-		basebackupFilename:   "basebackup.copy",
-		infoFilename:         "info.yaml",
-		msgLen:               make([]byte, 8),
-		archiveFilesQueue:    queue.New(ctx),
-		deltaFileAccessMutex: &sync.Mutex{},
+		Identifier:          tbl,
+		ctx:                 ctx,
+		wait:                group,
+		sleepBetweenBackups: time.Second * 3,
+		cfg:                 cfg,
+		dbCfg:               dbCfg,
+		tempDir:             path.Join(cfg.TempDir, tableDir),
+		finalDir:            path.Join(cfg.ArchiveDir, tableDir),
+		basebackupFilename:  "basebackup.copy",
+		infoFilename:        "info.yaml",
+		msgLen:              make([]byte, 8),
+		archiveFilesQueue:   queue.New(ctx),
+		segmentBufferMutex:  &sync.Mutex{},
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -116,6 +124,8 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 	}
 
 	tb.basebackupQueue = basebackupsQueue
+
+	tb.wait.Add(3)
 
 	go tb.janitor()
 	go tb.archiver()
@@ -125,199 +135,90 @@ func New(ctx context.Context, cfg *config.Config, tbl message.Identifier, dbCfg 
 }
 
 func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
-	t.deltaFileAccessMutex.Lock()
-	defer t.deltaFileAccessMutex.Unlock()
-
-	if t.deltaCnt >= t.cfg.DeltasPerFile || t.currentDeltaFp == nil {
-		if err := t.createNewDeltaFile(lsn); err != nil {
-			return 0, fmt.Errorf("could not rotate file: %v", err)
+	t.segmentBufferMutex.Lock()
+	defer t.segmentBufferMutex.Unlock()
+	// should we switch to the new segment already?
+	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
+		if t.segmentFilename != "" {
+			// flush current buffer to the delta filename and archive it.
+			if err := t.writeSegmentToFile(); err != nil {
+				return 0, fmt.Errorf("could not save current message; %v", err)
+			}
 		}
+		t.startNewSegment(lsn)
 	}
 
-	if t.deltaFilesCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
+	if t.segmentsCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
 		log.Printf("queueing base backup because we reached backupDeltaThreshold %s", t)
 		t.SetBasebackupPending()
 		t.basebackupQueue.Put(t)
 	}
 
-	t.deltaCnt++
-	t.deltasSinceBackupCnt++
-
 	ln := uint64(len(msg) + 8)
-
 	binary.BigEndian.PutUint64(t.msgLen, ln)
 
-	_, err := t.currentDeltaFp.Write(append(t.msgLen, msg...))
-	if err != nil {
-		return 0, fmt.Errorf("could not save delta: %v", err)
+	if err := t.appendDeltaToSegment(append(t.msgLen, msg...)); err != nil {
+		log.Printf("could not append delta to the current segment buffer: %v", err)
 	}
-
-	if t.cfg.Fsync {
-		if err := t.currentDeltaFp.Sync(); err != nil {
-			return 0, fmt.Errorf("could not fsync: %v", err)
-		}
-	}
-
-	t.lastWrittenMessage = time.Now()
 
 	return ln, nil
 }
 
-// the archiver goroutine is responsible for moving complete files to the final backup directory
-func (t *TableBackup) archiver() {
-	for {
-		select {
-		case <-t.ctx.Done():
-			return
-		case <-time.After(archiverWorkerNapTime):
-			for {
-				obj, err := t.archiveFilesQueue.Get()
-				if err != nil {
-					if err == context.Canceled {
-						return
-					}
-					// the only other error we expect is that the queue is empty, in which case we go to sleep
-					break
-				}
-				fname := obj.(string)
-				lsn := uint64(0)
-				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
-					var err error
-					lsn, err = utils.GetLSNFromDeltaFilename(filename)
-					if err != nil {
-						log.Printf("could not decode lsn from the file name %s: %v", filename)
-					}
-				}
-
-				archiveAction := func() (bool, error) {
-					if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
-						log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
-							fname, pgx.FormatLSN(t.firstDeltaLSNToKeep))
-						// a  code in RunBasebackup will take care of removing actual files from the temp directory
-						return false, nil
-					}
-					err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname))
-					return err != nil, err
-				}
-
-				err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
-				if err != nil {
-					log.Printf("could not archive %s: %v", fname, err)
-				}
-			}
-		}
+func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
+	var err error
+	if _, err = t.segmentBuffer.Write(currentDelta); err != nil {
+		return fmt.Errorf("could not write current delta: %v", err)
 	}
+
+	t.deltaCnt++
+	t.deltasSinceBackupCnt++
+	t.lastWrittenMessage = time.Now()
+
+	return err
 }
 
-// the janitor goroutine is responsible for closing files in the temporary directory
-// that didn't receive any writes for the specific amount of time (currently 3h)
-func (t *TableBackup) janitor() {
-	closeCall := time.NewTicker(archiverCloseNapTime)
-	for {
-		select {
-		case <-t.ctx.Done():
-			closeCall.Stop()
-			return
-		case <-closeCall.C:
-			if !t.triggerArchiveTimeoutOnTable() {
-				continue
-			}
-
-			t.deltaFileAccessMutex.Lock()
-			if err := t.currentDeltaFp.Close(); err != nil {
-				log.Printf("could not close %s due to inactivity: %v", t.currentDeltaFilename, err)
-				t.deltaFileAccessMutex.Unlock()
-				continue
-			}
-			t.currentDeltaFp = nil
-			// unlock as soon as possible, but no sooner than clearing up current delta file pointer and name
-			fname := t.currentDeltaFilename
-			t.currentDeltaFilename = ""
-			t.deltaFileAccessMutex.Unlock()
-
-			t.archiveFilesQueue.Put(fname)
-			log.Printf("archiving %s due to archiver timeout", fname)
-		}
-	}
-}
-
-// if we should archive the active non-empty delta due to the lack of activity on the table for a certain amount of time
-// TODO: make sure we don't have empty delta files opened in the first place and remove lastWrittenMessage.IsZero check.
-func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
-	return t.currentDeltaFp != nil &&
-		!t.lastWrittenMessage.IsZero() &&
-		t.cfg.ArchiverTimeout > 0 &&
-		time.Since(t.lastWrittenMessage) > t.cfg.ArchiverTimeout
-}
-
-// archiveOneFile returns error only if the actual copy failed, so that we could retry it. In all other "unusual" cases
-// it just displays a cause and bails out.
-func archiveOneFile(sourceFile, destFile string) (err error) {
-	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
-		fmt.Printf("source file doesn't exist: %q; skipping", sourceFile)
-		return nil
-	}
-
-	if st, err := os.Stat(destFile); os.IsExist(err) {
-		if st.Size() == 0 {
-			os.Remove(destFile)
-		} else {
-			fmt.Printf("destination file is not empty %q; skipping", destFile)
-			return nil
-
-		}
-	}
-
-	if _, err := copyFile(sourceFile, destFile); err != nil {
-		os.Remove(destFile)
-		return fmt.Errorf("could not move %s -> %s file: %v", sourceFile, destFile, err)
-	}
-
-	if err := os.Remove(sourceFile); err != nil {
-		fmt.Printf("could not delete old file: %v", err)
-	}
-	return nil
-}
-
-func (t *TableBackup) Files() int {
-	return t.deltaFilesCnt
-}
-
-func (t *TableBackup) createNewDeltaFile(newLSN uint64) error {
-	if t.currentDeltaFp != nil {
-		if err := t.currentDeltaFp.Close(); err != nil {
-			return fmt.Errorf("could not close old file: %v", err)
-		}
-
-		t.archiveFilesQueue.Put(t.currentDeltaFilename)
-	}
-
-	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
-	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
-		t.filenamePostfix++
-	} else {
-		t.filenamePostfix = 0
-	}
-
-	if t.filenamePostfix > 0 {
-		filename = fmt.Sprintf("%s.%x", filename, t.filenamePostfix)
-	}
-
-	fp, err := os.OpenFile(path.Join(t.tempDir, filename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+func (t *TableBackup) writeSegmentToFile() error {
+	deltaPath := path.Join(t.tempDir, t.segmentFilename)
+	fp, err := os.OpenFile(deltaPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaPath, err)
 	}
-	t.currentDeltaFp = fp
+	defer fp.Close()
 
-	t.currentDeltaFilename = filename
-	t.lastLSN = newLSN
-	t.deltaFilesCnt++
+	if _, err = t.segmentBuffer.WriteTo(fp); err != nil {
+		return fmt.Errorf("could not write delta segment to a file %s: %v", deltaPath, err)
+	}
+	if t.cfg.Fsync {
+		// sync the file data itself
+		if err := syncFileAndDirectory(fp, deltaPath, t.tempDir); err != nil {
+			return err
+		}
+	}
+	log.Printf("flushed current segment to disk file %s", deltaPath)
+	t.archiveFilesQueue.Put(t.segmentFilename)
+
+	return err
+}
+
+func (t *TableBackup) startNewSegment(startLSN uint64) {
+	t.segmentBuffer.Reset()
+	if startLSN != 0 {
+		t.setSegmentFilename(startLSN)
+
+		t.lastLSN = startLSN
+		t.segmentsCnt++
+	} else {
+		t.segmentFilename = ""
+	}
 	t.deltaCnt = 0
+}
 
-	return nil
+func (t *TableBackup) isCurrentSegmentEmpty() bool {
+	return t.segmentBuffer.Len() == 0
 }
 
 func (t *TableBackup) periodicBackup() {
+	defer t.wait.Done()
 	heartbeat := time.NewTicker(time.Minute)
 
 	for {
@@ -343,6 +244,157 @@ func (t *TableBackup) periodicBackup() {
 			}
 		}
 	}
+}
+
+// the archiver goroutine is responsible for moving complete files to the final backup directory, as well as for closing
+// files in the temporary directory that didn't receive any writes for the specific amount of time (currently 3h)
+func (t *TableBackup) archiver() {
+	defer t.wait.Done()
+
+	for {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-time.After(archiverWorkerNapTime):
+			for {
+				obj, err := t.archiveFilesQueue.Get()
+				if err != nil {
+					if err == context.Canceled {
+						return
+					}
+					// the only other error we expect is that the queue is empty, in which case we go to sleep
+					break
+				}
+				fname := obj.(string)
+				lsn := invalidLSN
+				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
+					var err error
+					lsn, err = utils.GetLSNFromDeltaFilename(filename)
+					if err != nil {
+						log.Printf("could not decode lsn from the file name %s: %v", filename)
+					}
+				}
+
+				archiveAction := func() (bool, error) {
+					if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
+						log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
+							fname, pgx.FormatLSN(t.firstDeltaLSNToKeep))
+						// a  code in RunBasebackup will take care of removing actual files from the temp directory
+						return false, nil
+					}
+					err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname), t.cfg.Fsync)
+					return err != nil, err
+				}
+
+				err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
+				if err != nil {
+					log.Printf("could not archive %s: %v", fname, err)
+				}
+			}
+		}
+	}
+}
+
+// the janitor goroutine is responsible for closing files in the temporary directory
+// that didn't receive any writes for the specific amount of time (currently 3h)
+func (t *TableBackup) janitor() {
+	defer t.wait.Done()
+
+	closeCall := time.NewTicker(archiverCloseNapTime)
+	for {
+		select {
+		case <-t.ctx.Done():
+			closeCall.Stop()
+
+			if err := t.archiveCurrentSegment("shutdown"); err != nil {
+				log.Printf("could not write active changes to on shutdown: %v", err)
+			}
+			return
+		case <-closeCall.C:
+			if !t.triggerArchiveTimeoutOnTable() {
+				continue
+			}
+			if err := t.archiveCurrentSegment("timeout"); err != nil {
+				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
+			}
+		}
+	}
+}
+
+func (t *TableBackup) archiveCurrentSegment(reason string) error {
+	t.segmentBufferMutex.Lock()
+	defer t.segmentBufferMutex.Unlock()
+	if t.segmentFilename == "" || t.deltaCnt == 0 {
+		return nil
+	}
+	log.Printf("writing and archiving current segment to %s due to the %s", t.segmentFilename, reason)
+	if err := t.writeSegmentToFile(); err != nil {
+		return err
+	}
+	t.startNewSegment(invalidLSN)
+
+	return nil
+}
+
+// if we should archive the active non-empty delta due to the lack of activity on the table for a certain amount of time
+// TODO: make sure we don't have empty delta files opened in the first place and remove lastWrittenMessage.IsZero check.
+func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
+	return !t.isCurrentSegmentEmpty() &&
+		!t.lastWrittenMessage.IsZero() &&
+		t.cfg.ArchiverTimeout > 0 &&
+		time.Since(t.lastWrittenMessage) > t.cfg.ArchiverTimeout
+}
+
+// archiveOneFile returns error only if the actual copy failed, so that we could retry it. In all other "unusual" cases
+// it just displays a cause and bails out.
+func archiveOneFile(sourceFile, destFile string, fsync bool) error {
+	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
+		fmt.Printf("source file doesn't exist: %q; skipping", sourceFile)
+		return nil
+	}
+
+	if st, err := os.Stat(destFile); os.IsExist(err) {
+		if st.Size() == 0 {
+			os.Remove(destFile)
+		} else {
+			fmt.Printf("destination file is not empty %q; skipping", destFile)
+			return nil
+
+		}
+	} else if err != nil {
+		return fmt.Errorf("could not stat %s: %v", destFile, err)
+	}
+
+	if _, err := copyFile(sourceFile, destFile, fsync); err != nil {
+		os.Remove(destFile)
+		return fmt.Errorf("could not move %s -> %s file: %v", sourceFile, destFile, err)
+	}
+
+	if err := os.Remove(sourceFile); err != nil {
+		fmt.Printf("could not delete old file: %v", err)
+	}
+	log.Printf("successfully archived %s", destFile)
+	return nil
+}
+
+func (t *TableBackup) Files() int {
+	return t.segmentsCnt
+}
+
+func (t *TableBackup) setSegmentFilename(newLSN uint64) {
+	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
+	// XXX: ignoring os.stat errors outside of 'file already exists'
+	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
+		t.filenamePostfix++
+	} else {
+		t.filenamePostfix = 0
+	}
+
+	if t.filenamePostfix > 0 {
+		filename = fmt.Sprintf("%s.%x", filename, t.filenamePostfix)
+	}
+
+	t.segmentFilename = filename
 }
 
 func (t *TableBackup) String() string {
@@ -378,6 +430,8 @@ func (t *TableBackup) hasRows() (bool, error) {
 }
 
 func (t *TableBackup) Truncate() error {
+	t.segmentBufferMutex.Lock()
+	defer t.segmentBufferMutex.Unlock()
 	if err := os.RemoveAll(t.tempDir); err != nil {
 		return fmt.Errorf("could not recreate table dir: %v", err)
 	}
@@ -386,9 +440,8 @@ func (t *TableBackup) Truncate() error {
 		return err
 	}
 
-	t.currentDeltaFp = nil
-	t.deltaCnt = 0
-	t.deltaFilesCnt = 0
+	t.startNewSegment(invalidLSN)
+	t.segmentsCnt = 0
 	t.filenamePostfix = 0
 
 	return nil
@@ -484,7 +537,25 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.Identifier) (message.Relation, er
 	return rel, nil
 }
 
-func copyFile(src, dst string) (int64, error) {
+func syncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
+	if err := fp.Sync(); err != nil {
+		return fmt.Errorf("could not sync file %s: %v", path, err)
+	}
+
+	// sync the directory entry
+	dP, err := os.Open(parentDirectoryName)
+	defer dP.Close()
+	if err != nil {
+		return fmt.Errorf("could not open directory %s to sync: %v", parentDirectoryName, err)
+	}
+	if err = dP.Sync(); err != nil {
+		return fmt.Errorf("could not sync directory %s: %v", err)
+	}
+
+	return nil
+}
+
+func copyFile(src, dst string, fsync bool) (int64, error) {
 	sourceFileStat, err := os.Stat(src)
 	if err != nil {
 		return 0, err
@@ -506,6 +577,15 @@ func copyFile(src, dst string) (int64, error) {
 	}
 	defer destination.Close()
 	nBytes, err := io.Copy(destination, source)
+	if err != nil {
+		return nBytes, fmt.Errorf("could not copy %s to %s: %v", err)
+	}
+	if fsync {
+		if err = syncFileAndDirectory(destination, dst, path.Dir(dst)); err != nil {
+			return nBytes, fmt.Errorf("could not sync %s: %v", dst, err)
+		}
+	}
 
-	return nBytes, err
+	return nBytes, nil
+
 }

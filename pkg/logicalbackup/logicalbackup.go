@@ -69,6 +69,7 @@ type LogicalBackup struct {
 
 	basebackupQueue *queue.Queue
 	waitGr          *sync.WaitGroup
+	stopCh          chan struct{}
 
 	msgCnt       map[cmdType]int
 	bytesWritten uint64
@@ -80,7 +81,7 @@ type LogicalBackup struct {
 	srv http.Server
 }
 
-func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
+func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
 	var (
 		startLSN   uint64
 		slotExists bool
@@ -99,8 +100,9 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:   ctx,
-		dbCfg: pgxConn,
+		ctx:                    ctx,
+		stopCh:                 stopCh,
+		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		relations:              make(map[message.Identifier]message.Relation),
@@ -238,7 +240,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 					if b.cfg.TrackNewTables {
 						log.Printf("new table %s", tblName)
 
-						tb, tErr := tablebackup.New(b.ctx, b.cfg, tblName, b.dbCfg, b.basebackupQueue)
+						tb, tErr := tablebackup.New(b.ctx, b.waitGr, b.cfg, tblName, b.dbCfg, b.basebackupQueue)
 						if tErr != nil {
 							err = fmt.Errorf("could not init tablebackup: %v", tErr)
 						} else {
@@ -345,14 +347,16 @@ func (b *LogicalBackup) sendStatus() error {
 	return nil
 }
 
-func (b *LogicalBackup) startReplication() error {
+func (b *LogicalBackup) startReplication() {
 	defer b.waitGr.Done()
 
 	log.Printf("Starting from %s lsn", pgx.FormatLSN(b.startLSN))
 
 	err := b.replConn.StartReplication(b.cfg.Slotname, b.startLSN, -1, b.pluginArgs...)
 	if err != nil {
-		log.Fatalf("failed to start replication: %s", err)
+		log.Printf("failed to start replication: %s", err)
+		b.stopCh <- struct{}{}
+		return
 	}
 
 	ticker := time.NewTicker(b.statusTimeout)
@@ -360,10 +364,12 @@ func (b *LogicalBackup) startReplication() error {
 		select {
 		case <-b.ctx.Done():
 			ticker.Stop()
-			return nil
+			return
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
-				log.Fatalf("could not send status: %v", err)
+				log.Printf("could not send status: %v", err)
+				b.stopCh <- struct{}{}
+				return
 			}
 		default:
 			wctx, cancel := context.WithTimeout(b.ctx, b.replMessageWaitTimeout)
@@ -372,8 +378,15 @@ func (b *LogicalBackup) startReplication() error {
 			if err == context.DeadlineExceeded {
 				continue
 			}
+			if err == context.Canceled {
+				log.Printf("received shutdown request: replication terminated")
+				break
+			}
+			// TODO: make sure we retry and cleanup after ourselves afterwards
 			if err != nil {
-				log.Fatalf("replication failed: %s", err)
+				log.Printf("replication failed: %v", err)
+				b.stopCh <- struct{}{}
+				return
 			}
 
 			if repMsg == nil {
@@ -384,17 +397,23 @@ func (b *LogicalBackup) startReplication() error {
 			if repMsg.WalMessage != nil {
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
-					log.Fatalf("invalid pgoutput message: %s", err)
+					log.Printf("invalid pgoutput message: %s", err)
+					b.stopCh <- struct{}{}
+					return
 				}
 				if err := b.handler(logmsg); err != nil {
-					log.Fatalf("error handling waldata: %s", err)
+					log.Printf("error handling waldata: %s", err)
+					b.stopCh <- struct{}{}
+					return
 				}
 			}
 
 			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
 				log.Println("server wants a reply")
 				if err := b.sendStatus(); err != nil {
-					log.Fatalf("could not send status: %v", err)
+					log.Printf("could not send status: %v", err)
+					b.stopCh <- struct{}{}
+					return
 				}
 			}
 		}
@@ -554,7 +573,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn)
 		}
 
-		tb, err := tablebackup.New(b.ctx, b.cfg, t.name, b.dbCfg, b.basebackupQueue)
+		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, t.name, b.dbCfg, b.basebackupQueue)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
@@ -669,7 +688,9 @@ func (b *LogicalBackup) Run() {
 
 	go func() {
 		if err2 := b.srv.ListenAndServe(); err2 != http.ErrServerClosed {
-			log.Fatalf("Could not start http server: %v", err2)
+			log.Printf("Could not start http server: %v", err2)
+			b.stopCh <- struct{}{}
+			return
 		}
 	}()
 }

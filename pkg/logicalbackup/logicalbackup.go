@@ -68,9 +68,9 @@ type LogicalBackup struct {
 	flushLSN       uint64
 	lastTxId       int32
 
-	basebackupQueue    *queue.Queue
-	waitGr             *sync.WaitGroup
-	TerminationRequest chan struct{}
+	basebackupQueue *queue.Queue
+	waitGr          *sync.WaitGroup
+	stopCh          chan struct{}
 
 	msgCnt       map[cmdType]int
 	bytesWritten uint64
@@ -82,7 +82,7 @@ type LogicalBackup struct {
 	srv http.Server
 }
 
-func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
+func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
 	var (
 		startLSN   uint64
 		slotExists bool
@@ -102,6 +102,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 
 	lb := &LogicalBackup{
 		ctx:                    ctx,
+		stopCh:                 stopCh,
 		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
@@ -119,8 +120,6 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 			Addr:    fmt.Sprintf(":%d", 8080),                    // TODO: get rid of the hardcoded value
 			Handler: http.TimeoutHandler(mux, time.Second*5, ""), // TODO: get rid of the hardcoded value
 		},
-		// we don't want multiple routines trying to die at the same time to block
-		TerminationRequest: make(chan struct{}, 128),
 	}
 
 	if _, err := os.Stat(cfg.TempDir); os.IsNotExist(err) {
@@ -189,7 +188,7 @@ func New(ctx context.Context, cfg *config.Config) (*LogicalBackup, error) {
 func (lb *LogicalBackup) die(message string, args ...interface{}) {
 	log.Printf(message, args...)
 	// tell main to close the shop and go home
-	lb.TerminationRequest <- struct{}{}
+	lb.stopCh <- struct{}{}
 	// deferred waigroup increment will not be executed, do it now.
 	lb.waitGr.Done()
 	// terminate this goroutine a hard way

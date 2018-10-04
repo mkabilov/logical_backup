@@ -16,6 +16,7 @@ func main() {
 	defer log.Printf("successfully shut down")
 
 	ctx, done := context.WithCancel(context.Background())
+	stopCh := make(chan struct{}, 128)
 
 	if len(os.Args) < 2 {
 		fmt.Printf("usage:\n\t%s {config file}\n", os.Args[0])
@@ -43,7 +44,7 @@ func main() {
 			cfg.ForceBasebackupAfterInactivityInterval)
 	}
 
-	lb, err := logicalbackup.New(ctx, cfg)
+	lb, err := logicalbackup.New(ctx, stopCh, cfg)
 	if err != nil {
 		log.Fatalf("could not create backup instance: %v", err)
 	}
@@ -77,7 +78,7 @@ loop:
 			default:
 				log.Printf("unhandled signal: %v", sig)
 			}
-		case <-lb.TerminationRequest:
+		case <-stopCh:
 			{
 				log.Printf("received termination request, cleaning up...")
 				break loop

@@ -489,62 +489,79 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	// fetch all tables from the current publication, together with the information on whether we need to create
 	// replica identity full for them
 	type tableInfo struct {
-		oid                uint32
-		t                  message.Identifier
-		hasReplicaIdentity bool
+		oid             uint32
+		name            message.Identifier
+		hasPK           bool
+		replicaIdentity message.ReplicaIdentity
 	}
 	rows, err := conn.Query(`
 			select c.oid,
 				   n.nspname,
 				   c.relname,
-                   case
-                    when c.relreplident = 'n' or (c.relreplident = 'd' and csr.oid is null) then false
-                    else true
-                   end as has_replica_identity
+			       csr.oid is not null as has_pk,
+                   c.relreplident as replica_identity
 			from pg_class c
 				   join pg_namespace n on n.oid = c.relnamespace
        			   join pg_publication_tables pub on (c.relname = pub.tablename and n.nspname = pub.schemaname)
        			   left join pg_constraint csr on (csr.conrelid = c.oid and csr.contype = 'p')
 			where c.relkind = 'r'
-  			  and pub.pubname = $1
-			order by c.oid;`, b.cfg.PublicationName)
+  			  and pub.pubname = $1`, b.cfg.PublicationName)
 	if err != nil {
 		return fmt.Errorf("could not execute query: %v", err)
 	}
 
 	tables := make([]tableInfo, 0)
-	if err = func() error {
+	func() {
 		defer rows.Close()
+
 		for rows.Next() {
 			tab := tableInfo{}
-			if err := rows.Scan(&tab.oid, &tab.t.Namespace, &tab.t.Name, &tab.hasReplicaIdentity); err != nil {
-				return fmt.Errorf("could not fetch row values from the driver: %v", err)
+			err = rows.Scan(&tab.oid, &tab.name.Namespace, &tab.name.Name, &tab.hasPK, &tab.replicaIdentity)
+			if err != nil {
+				return
 			}
+
 			tables = append(tables, tab)
 		}
-		return nil
-	}(); err != nil {
-		return err
+	}()
+
+	if err != nil {
+		return fmt.Errorf("could not fetch row values from the driver: %v", err)
 	}
 
 	if len(tables) == 0 && !b.cfg.TrackNewTables {
 		return fmt.Errorf("no tables found")
 	}
-	for _, tab := range tables {
-		if !tab.hasReplicaIdentity {
-			fqtn := fmt.Sprintf("%s", pgx.Identifier{tab.t.Namespace, tab.t.Name}.Sanitize())
-			if _, err := conn.Exec(fmt.Sprintf("alter table only %s replica identity full", fqtn)); err != nil {
-				return fmt.Errorf("could not set replica identity to full for table %s: %v", fqtn, err)
-			}
-			log.Printf("set replica identity to full for table %s", fqtn)
+
+	for _, t := range tables {
+		var targetReplicaIdentity message.ReplicaIdentity
+
+		if t.hasPK {
+			targetReplicaIdentity = message.ReplicaIdentityDefault
+		} else if t.replicaIdentity != message.ReplicaIdentityIndex {
+			targetReplicaIdentity = message.ReplicaIdentityFull
+		} else {
+			targetReplicaIdentity = t.replicaIdentity
 		}
 
-		tb, err := tablebackup.New(b.ctx, b.cfg, tab.t, b.dbCfg, b.basebackupQueue)
+		if targetReplicaIdentity != t.replicaIdentity {
+			fqtn := t.name.Sanitize()
+
+			if _, err := conn.Exec(fmt.Sprintf("alter table only %s replica identity %s", fqtn, targetReplicaIdentity)); err != nil {
+				return fmt.Errorf("could not set replica identity to %s for table %s: %v", targetReplicaIdentity, fqtn, err)
+			}
+
+			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn)
+		}
+
+		tb, err := tablebackup.New(b.ctx, b.cfg, t.name, b.dbCfg, b.basebackupQueue)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
-		b.backupTables[tab.oid] = tb
+
+		b.backupTables[t.oid] = tb
 	}
+
 	return nil
 }
 

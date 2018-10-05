@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
+	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/decoder"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
@@ -54,7 +55,7 @@ type LogicalBackup struct {
 
 	pluginArgs []string
 
-	backupTables map[uint32]tablebackup.TableBackuper
+	backupTables map[dbutils.Oid]tablebackup.TableBackuper
 
 	dbCfg    pgx.ConnConfig
 	replConn *pgx.ReplicationConn // connection for logical replication
@@ -64,12 +65,12 @@ type LogicalBackup struct {
 	statusTimeout          time.Duration
 
 	relations     map[message.NamespacedName]message.Relation
-	relationNames map[uint32]message.NamespacedName
-	types         map[uint32]message.Type
+	relationNames map[dbutils.Oid]message.NamespacedName
+	types         map[dbutils.Oid]message.Type
 
-	storedFlushLSN uint64
-	startLSN       uint64
-	flushLSN       uint64
+	storedFlushLSN dbutils.Lsn
+	startLSN       dbutils.Lsn
+	flushLSN       dbutils.Lsn
 	lastTxId       int32
 
 	basebackupQueue *queue.Queue
@@ -79,7 +80,7 @@ type LogicalBackup struct {
 	msgCnt       map[cmdType]int
 	bytesWritten uint64
 
-	txBeginRelMsg map[uint32]struct{}
+	txBeginRelMsg map[dbutils.Oid]struct{}
 	beginMsg      []byte
 	typeMsg       []byte
 
@@ -88,7 +89,7 @@ type LogicalBackup struct {
 
 func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
 	var (
-		startLSN   uint64
+		startLSN   dbutils.Lsn
 		slotExists bool
 		err        error
 	)
@@ -105,15 +106,15 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:    ctx,
-		stopCh: stopCh,
-		dbCfg:  pgxConn,
+		ctx:                    ctx,
+		stopCh:                 stopCh,
+		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		relations:              make(map[message.NamespacedName]message.Relation),
-		relationNames:          make(map[uint32]message.NamespacedName),
-		types:                  make(map[uint32]message.Type),
-		backupTables:           make(map[uint32]tablebackup.TableBackuper),
+		relationNames:          make(map[dbutils.Oid]message.NamespacedName),
+		types:                  make(map[dbutils.Oid]message.Type),
+		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
@@ -164,7 +165,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		if err != nil {
 			return nil, fmt.Errorf("could not create replication slot: %v", err)
 		}
-		log.Printf("Created missing replication slot %q, consistent point %s", lb.cfg.Slotname, pgx.FormatLSN(startLSN))
+		log.Printf("Created missing replication slot %q, consistent point %s", lb.cfg.Slotname, startLSN)
 
 		lb.startLSN = startLSN
 		if err := lb.storeRestartLSN(); err != nil {
@@ -189,7 +190,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	return lb, nil
 }
 
-func (b *LogicalBackup) saveTableMessage(tableOID uint32, msg []byte) error {
+func (b *LogicalBackup) saveTableMessage(tableOID dbutils.Oid, msg []byte) error {
 	bt, ok := b.backupTables[tableOID]
 	if !ok {
 		log.Printf("table is not tracked %s", b.relationNames[tableOID])
@@ -288,7 +289,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		b.lastTxId = v.XID
 		b.flushLSN = v.FinalLSN
 
-		b.txBeginRelMsg = make(map[uint32]struct{})
+		b.txBeginRelMsg = make(map[dbutils.Oid]struct{})
 		b.beginMsg = v.Raw
 	case message.Commit:
 		var ln uint64
@@ -324,12 +325,12 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 func (b *LogicalBackup) sendStatus() error {
 	log.Printf("sending new status with %s flush lsn (i:%d u:%d d:%d b:%0.2fMb) ",
-		pgx.FormatLSN(b.flushLSN), b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete], float64(b.bytesWritten)/1048576)
+		b.flushLSN, b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete], float64(b.bytesWritten)/1048576)
 
 	b.msgCnt = make(map[cmdType]int)
 	b.bytesWritten = 0
 
-	status, err := pgx.NewStandbyStatus(b.flushLSN)
+	status, err := pgx.NewStandbyStatus(uint64(b.flushLSN))
 
 	if err != nil {
 		return fmt.Errorf("error creating standby status: %s", err)
@@ -353,9 +354,9 @@ func (b *LogicalBackup) sendStatus() error {
 func (b *LogicalBackup) startReplication() {
 	defer b.waitGr.Done()
 
-	log.Printf("Starting from %s lsn", pgx.FormatLSN(b.startLSN))
+	log.Printf("Starting from %s lsn", b.startLSN)
 
-	err := b.replConn.StartReplication(b.cfg.Slotname, b.startLSN, -1, b.pluginArgs...)
+	err := b.replConn.StartReplication(b.cfg.Slotname, uint64(b.startLSN), -1, b.pluginArgs...)
 	if err != nil {
 		log.Printf("failed to start replication: %s", err)
 		b.stopCh <- struct{}{}
@@ -426,6 +427,8 @@ func (b *LogicalBackup) startReplication() {
 func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 	slotExists := false
 
+	var lsn dbutils.Lsn
+
 	rows, err := conn.Query("select confirmed_flush_lsn, slot_type, database from pg_replication_slots where slot_name = $1;", b.cfg.Slotname)
 	if err != nil {
 		return false, fmt.Errorf("could not execute query: %v", err)
@@ -451,8 +454,7 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 		if database != b.dbCfg.Database {
 			return false, fmt.Errorf("replication slot %q belongs to %q database", b.cfg.Slotname, database)
 		}
-
-		if lsn, err := pgx.ParseLSN(lsnString); err != nil {
+		if err := lsn.Parse(lsnString); err != nil {
 			return false, fmt.Errorf("could not parse lsn: %v", err)
 		} else {
 			b.startLSN = lsn
@@ -462,7 +464,7 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 	return slotExists, nil
 }
 
-func (b *LogicalBackup) createSlot(conn *pgx.Conn) (uint64, error) {
+func (b *LogicalBackup) createSlot(conn *pgx.Conn) (dbutils.Lsn, error) {
 	var strLSN sql.NullString
 	row := conn.QueryRowEx(b.ctx, "select lsn from pg_create_logical_replication_slot($1, $2)",
 		nil, b.cfg.Slotname, outputPlugin)
@@ -479,7 +481,7 @@ func (b *LogicalBackup) createSlot(conn *pgx.Conn) (uint64, error) {
 		return 0, fmt.Errorf("could not parse lsn: %v", err)
 	}
 
-	return lsn, nil
+	return dbutils.Lsn(lsn), nil
 }
 
 // Wait for the goroutines to finish
@@ -516,7 +518,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	// fetch all tables from the current publication, together with the information on whether we need to create
 	// replica identity full for them
 	type tableInfo struct {
-		oid             uint32
+		oid             dbutils.Oid
 		name            message.NamespacedName
 		hasPK           bool
 		replicaIdentity message.ReplicaIdentity
@@ -592,7 +594,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	return nil
 }
 
-func (b *LogicalBackup) readRestartLSN() (uint64, error) {
+func (b *LogicalBackup) readRestartLSN() (dbutils.Lsn, error) {
 	var stateInfo StateInfo
 
 	stateFilename := path.Join(b.cfg.TempDir, b.stateFilename)
@@ -612,10 +614,10 @@ func (b *LogicalBackup) readRestartLSN() (uint64, error) {
 
 	currentLSN, err := pgx.ParseLSN(stateInfo.CurrentLSN)
 	if err != nil {
-		return 0, fmt.Errorf("could not parse %q LSN string: %v", stateInfo.CurrentLSN, err)
+		return 0, fmt.Errorf("could not parse %q Lsn string: %v", stateInfo.CurrentLSN, err)
 	}
 
-	return currentLSN, nil
+	return dbutils.Lsn(currentLSN), nil
 }
 
 func (b *LogicalBackup) storeRestartLSN() error {
@@ -635,7 +637,7 @@ func (b *LogicalBackup) storeRestartLSN() error {
 
 	stateInfo := StateInfo{
 		Timestamp:  time.Now(),
-		CurrentLSN: pgx.FormatLSN(b.flushLSN),
+		CurrentLSN: b.flushLSN.String(),
 	}
 
 	if err := yaml.NewEncoder(fp).Encode(stateInfo); err != nil {

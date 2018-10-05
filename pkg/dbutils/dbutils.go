@@ -14,6 +14,26 @@ const (
 	lockTimeoutCode = "55P03"
 )
 
+type Lsn uint64
+
+func (l Lsn) String() string {
+	return pgx.FormatLSN(uint64(l))
+}
+
+func (l *Lsn) Parse(lsn string) error {
+	tmp, err := pgx.ParseLSN(lsn)
+	if err != nil {
+		return err
+
+	}
+	*l = (Lsn)(tmp)
+	return nil
+}
+
+const InvalidLsn Lsn = 0
+
+type Oid uint32
+
 var MaxRetriesErr = errors.New("reached max retries")
 
 func QuoteLiteral(str string) string {

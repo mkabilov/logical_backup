@@ -13,13 +13,14 @@ import (
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
 
+	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 func (t *TableBackup) RunBasebackup() error {
 	var (
-		backupLSN, preBackupLSN, postBackupLSN uint64
+		backupLSN, preBackupLSN, postBackupLSN dbutils.Lsn
 	)
 
 	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
@@ -120,7 +121,7 @@ func (t *TableBackup) RunBasebackup() error {
 
 	t.lastBackupDuration = time.Since(startTime)
 	err = yaml.NewEncoder(infoFp).Encode(message.DumpInfo{
-		StartLSN:       pgx.FormatLSN(backupLSN),
+		StartLSN:       backupLSN.String(),
 		CreateDate:     time.Now(),
 		Relation:       relationInfo,
 		BackupDuration: t.lastBackupDuration.Seconds(),
@@ -144,19 +145,18 @@ func (t *TableBackup) RunBasebackup() error {
 
 	if candidateLSN > backupLSN {
 		log.Printf("first delta lsn to keep %s is higher than the backup lsn %s, attempting the previous delta lsn %s",
-			pgx.FormatLSN(postBackupLSN), pgx.FormatLSN(backupLSN), pgx.FormatLSN(preBackupLSN))
+			postBackupLSN, backupLSN, preBackupLSN)
 		// lookd like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
 			log.Panic("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
-				t, pgx.FormatLSN(backupLSN), pgx.FormatLSN(t.firstDeltaLSNToKeep))
+				t, backupLSN, t.firstDeltaLSNToKeep)
 		}
 		candidateLSN = preBackupLSN
 	}
 
 	// Make sure we have a cutoff point
 	if candidateLSN == 0 {
-		log.Printf("first delta to keep lsn is not defined, reverting to the backup lsn %s",
-			pgx.FormatLSN(backupLSN))
+		log.Printf("first delta to keep lsn is not defined, reverting to the backup lsn %s", backupLSN)
 		candidateLSN = backupLSN
 	}
 
@@ -166,8 +166,8 @@ func (t *TableBackup) RunBasebackup() error {
 	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
 		t.String(),
 		t.lastBackupDuration.Truncate(1*time.Second),
-		pgx.FormatLSN(backupLSN),
-		pgx.FormatLSN(t.firstDeltaLSNToKeep))
+		backupLSN,
+		t.firstDeltaLSNToKeep)
 
 	// not that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
 	for _, basedir := range []string{t.tempDir, t.finalDir} {
@@ -229,8 +229,7 @@ func (t *TableBackup) tempSlotName() string {
 }
 
 func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
-	log.Printf("Purging segments in %s before the lsn %s",
-		deltasDir, pgx.FormatLSN(t.firstDeltaLSNToKeep))
+	log.Printf("Purging segments in %s before the LSN %s", deltasDir, t.firstDeltaLSNToKeep)
 	fileList, err := ioutil.ReadDir(deltasDir)
 	if err != nil {
 		return fmt.Errorf("could not list directory: %v", err)
@@ -347,10 +346,10 @@ func (t *TableBackup) copyDump() error {
 	return nil
 }
 
-func (t *TableBackup) createTempReplicationSlot() (uint64, error) {
+func (t *TableBackup) createTempReplicationSlot() (dbutils.Lsn, error) {
 	var createdSlotName, basebackupLSN, snapshotName, plugin sql.NullString
 
-	var lsn uint64
+	var lsn dbutils.Lsn
 
 	if t.tx == nil {
 		return lsn, fmt.Errorf("no running transaction")
@@ -377,8 +376,7 @@ func (t *TableBackup) createTempReplicationSlot() (uint64, error) {
 		return lsn, fmt.Errorf("null consistent point")
 	}
 
-	lsn, err := pgx.ParseLSN(basebackupLSN.String)
-	if err != nil {
+	if err := lsn.Parse(basebackupLSN.String); err != nil {
 		return lsn, fmt.Errorf("could not parse LSN: %v", err)
 	}
 	if lsn == 0 {

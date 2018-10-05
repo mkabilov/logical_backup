@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
@@ -49,13 +50,13 @@ func Retry(fn func() (bool, error), numberOfAttempts int, timeBetweenAttempts ti
 	return fmt.Errorf("did not succeed after %d attempts", numberOfAttempts)
 }
 
-func GetLSNFromDeltaFilename(filename string) (lsn uint64, err error) {
+func GetLSNFromDeltaFilename(filename string) (dbutils.Lsn, error) {
 	lsnStr := filename
 	if strings.Contains(filename, ".") {
 		parts := strings.Split(filename, ".")
 		lsnStr = parts[0]
 	}
 
-	lsn, err = strconv.ParseUint(lsnStr, 16, 64)
-	return
+	lsn, err := strconv.ParseUint(lsnStr, 16, 64)
+	return dbutils.Lsn(lsn), err
 }

@@ -17,27 +17,27 @@ import (
 	"github.com/jackc/pgx/pgtype"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
+	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 const (
-	dirPerms                        = os.ModePerm
-	deltasDirName                   = "deltas"
-	basebackupFilename              = "basebackup.copy"
-	tableInfoFilename               = "info.yaml"
-	maxArchiverRetryTimeout         = 5 * time.Second
-	maxArchiverRetryAttempts        = 3
-	archiverWorkerNapTime           = 500 * time.Millisecond
-	archiverCloseNapTime            = 1 * time.Minute
-	invalidLSN               uint64 = 0
+	dirPerms                 = os.ModePerm
+	deltasDirName            = "deltas"
+	basebackupFilename       = "basebackup.copy"
+	tableInfoFilename        = "info.yaml"
+	maxArchiverRetryTimeout  = 5 * time.Second
+	maxArchiverRetryAttempts = 3
+	archiverWorkerNapTime    = 500 * time.Millisecond
+	archiverCloseNapTime     = 1 * time.Minute
 )
 
 type TableBackuper interface {
 	TableBaseBackup
 
-	SaveRawMessage([]byte, uint64) (uint64, error)
+	SaveRawMessage([]byte, dbutils.Lsn) (uint64, error)
 	Files() int
 	Truncate() error
 	String() string
@@ -75,7 +75,7 @@ type TableBackup struct {
 	deltaCnt             int
 	segmentsCnt          int
 	deltasSinceBackupCnt int
-	lastLSN              uint64
+	lastLSN              dbutils.Lsn
 
 	segmentBufferMutex *sync.Mutex
 	segmentFilename    string
@@ -85,7 +85,7 @@ type TableBackup struct {
 	segmentBuffer bytes.Buffer
 
 	// Basebackup
-	firstDeltaLSNToKeep uint64
+	firstDeltaLSNToKeep dbutils.Lsn
 	lastBasebackupTime  time.Time
 	sleepBetweenBackups time.Duration
 	lastBackupDuration  time.Duration
@@ -136,7 +136,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 	return &tb, nil
 }
 
-func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
+func (t *TableBackup) SaveRawMessage(msg []byte, lsn dbutils.Lsn) (uint64, error) {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
 
@@ -157,14 +157,14 @@ func (t *TableBackup) SaveRawMessage(msg []byte, lsn uint64) (uint64, error) {
 		t.basebackupQueue.Put(t)
 	}
 
-	ln := uint64(len(msg) + 8)
-	binary.BigEndian.PutUint64(t.msgLen, ln)
+	length := uint64(len(msg) + 8)
+	binary.BigEndian.PutUint64(t.msgLen, length)
 
 	if err := t.appendDeltaToSegment(append(t.msgLen, msg...)); err != nil {
 		log.Printf("could not append delta to the current segment buffer: %v", err)
 	}
 
-	return ln, nil
+	return length, nil
 }
 
 func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
@@ -204,7 +204,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 	return err
 }
 
-func (t *TableBackup) startNewSegment(startLSN uint64) {
+func (t *TableBackup) startNewSegment(startLSN dbutils.Lsn) {
 	t.segmentBuffer.Reset()
 	if startLSN != 0 {
 		t.setSegmentFilename(startLSN)
@@ -270,7 +270,7 @@ func (t *TableBackup) archiver() {
 					break
 				}
 				fname := obj.(string)
-				lsn := invalidLSN
+				lsn := dbutils.InvalidLsn
 				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
 					var err error
 					lsn, err = utils.GetLSNFromDeltaFilename(filename)
@@ -282,7 +282,7 @@ func (t *TableBackup) archiver() {
 				archiveAction := func() (bool, error) {
 					if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
 						log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
-							fname, pgx.FormatLSN(t.firstDeltaLSNToKeep))
+							fname, t.firstDeltaLSNToKeep)
 						// a  code in RunBasebackup will take care of removing actual files from the temp directory
 						return false, nil
 					}
@@ -337,7 +337,7 @@ func (t *TableBackup) archiveCurrentSegment(reason string) error {
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
 	}
-	t.startNewSegment(invalidLSN)
+	t.startNewSegment(dbutils.InvalidLsn)
 
 	return nil
 }
@@ -387,7 +387,7 @@ func (t *TableBackup) Files() int {
 	return t.segmentsCnt
 }
 
-func (t *TableBackup) setSegmentFilename(newLSN uint64) {
+func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
 	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
@@ -446,7 +446,7 @@ func (t *TableBackup) Truncate() error {
 		return err
 	}
 
-	t.startNewSegment(invalidLSN)
+	t.startNewSegment(dbutils.InvalidLsn)
 	t.segmentsCnt = 0
 	t.filenamePostfix = 0
 
@@ -495,7 +495,7 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation, error) {
 	var (
 		rel            message.Relation
-		relOid         uint32
+		relOid         dbutils.Oid
 		relRepIdentity pgtype.BPChar
 	)
 
@@ -534,7 +534,7 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation
 		columns = append(columns, message.Column{
 			IsKey:         false,
 			Name:          name,
-			TypeOID:       attType,
+			TypeOID:       dbutils.Oid(attType),
 			Mode:          typMod,
 			FormattedType: formatType,
 		})

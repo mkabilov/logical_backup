@@ -1,22 +1,25 @@
 package utils
 
 import (
-	"crypto/md5"
 	"fmt"
+	"github.com/ikitiki/logical_backup/pkg/message"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
-func TableDir(tbl message.NamespacedName) string {
-	tblHash := fmt.Sprintf("%x", md5.Sum([]byte(tbl.Sanitize())))
+func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
 
-	// TODO: consider removing tblHash altogether to shorten the path
-	return path.Join(tblHash[0:2], tblHash[2:4], tblHash[4:6], tblHash, fmt.Sprintf("%s.%s", tbl.Namespace, tbl.Name))
+	if oid == dbutils.InvalidOid {
+		panic(fmt.Sprintf("requested table directories for the table %s with invalid oid", tbl))
+	}
+
+	tblOidBytes := fmt.Sprintf("%08x", oid)
+
+	return path.Join(tblOidBytes[0:2], tblOidBytes[2:4], tblOidBytes[4:6], fmt.Sprintf("%d", oid))
 }
 
 // Retry retries a given function until either it returns false, which indicates success, or the number of attempts

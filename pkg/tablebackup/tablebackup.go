@@ -57,7 +57,7 @@ type TableBackup struct {
 	wait *sync.WaitGroup
 
 	// Table info
-	oid uint32
+	oid dbutils.Oid
 
 	// Basebackup
 	tx    *pgx.Tx
@@ -100,13 +100,13 @@ type TableBackup struct {
 	archiveFilesQueue *queue.Queue
 }
 
-//TODO: maybe use oid instead of schema-name pair?
-func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName,
+func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.Oid,
 	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) {
-	tableDir := utils.TableDir(tbl)
+	tableDir := utils.TableDir(tbl, oid)
 
 	tb := TableBackup{
 		NamespacedName:      tbl,
+		oid:                 oid,
 		ctx:                 ctx,
 		wait:                group,
 		sleepBetweenBackups: time.Second * 3,

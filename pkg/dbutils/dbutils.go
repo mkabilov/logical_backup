@@ -1,17 +1,7 @@
 package dbutils
 
 import (
-	"context"
-	"fmt"
-
-	"log"
-
 	"github.com/jackc/pgx"
-	"github.com/pkg/errors"
-)
-
-const (
-	lockTimeoutCode = "55P03"
 )
 
 type Lsn uint64
@@ -30,11 +20,12 @@ func (l *Lsn) Parse(lsn string) error {
 	return nil
 }
 
-const InvalidLsn Lsn = 0
-
 type Oid uint32
 
-var MaxRetriesErr = errors.New("reached max retries")
+const (
+	InvalidOid Oid = 0
+	InvalidLsn Lsn = 0
+)
 
 func QuoteLiteral(str string) string {
 	needsEscapeChar := false
@@ -62,48 +53,4 @@ func QuoteLiteral(str string) string {
 	} else {
 		return `'` + res + `'`
 	}
-}
-
-func RepeatedlyTry(ctx context.Context, conn *pgx.Conn, timeoutSec, retries int, sql string, arguments ...interface{}) error {
-	for i := 0; i < retries; i++ {
-		log.Printf("try %d: %q", i, sql)
-
-		tx, err := conn.Begin()
-		if err != nil {
-			return fmt.Errorf("could not start transaction: %v", err)
-		}
-
-		if _, err := tx.Exec(fmt.Sprintf(`set lock_timeout to '%d s'`, timeoutSec)); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("could not set lock_timeout: %v", err)
-		}
-
-		select {
-		case <-ctx.Done():
-			tx.Rollback()
-			return nil
-		default:
-		}
-
-		_, err = tx.Exec(sql, arguments...)
-		if err != nil {
-			pgxErr, ok := err.(pgx.PgError)
-			if !ok {
-				tx.Rollback()
-				return err
-			}
-
-			if pgxErr.Code != lockTimeoutCode {
-				tx.Rollback()
-				return err
-			}
-		} else {
-			tx.Commit()
-			return nil
-		}
-
-		tx.Rollback()
-	}
-
-	return MaxRetriesErr
 }

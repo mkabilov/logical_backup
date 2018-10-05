@@ -375,10 +375,10 @@ func (t TupleKind) String() string {
 	return "unknown"
 }
 
-func (i NamespacedName) String() string {
-	return pgx.Identifier{i.Namespace, i.Name}.Sanitize()
+func (n NamespacedName) String() string {
+	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
 }
 
-func (i NamespacedName) Sanitize() string {
-	return pgx.Identifier{i.Namespace, i.Name}.Sanitize()
+func (n NamespacedName) Sanitize() string {
+	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
 }

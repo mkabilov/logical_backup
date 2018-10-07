@@ -579,12 +579,10 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 
 		for rows.Next() {
 			tab := tableInfo{}
-			var oid uint32
-			err = rows.Scan(&oid, &tab.name.Namespace, &tab.name.Name, &tab.hasPK, &tab.replicaIdentity)
+			err = rows.Scan(&tab.oid, &tab.name.Namespace, &tab.name.Name, &tab.hasPK, &tab.replicaIdentity)
 			if err != nil {
 				return
 			}
-			tab.oid = dbutils.Oid(oid)
 
 			tables = append(tables, tab)
 		}

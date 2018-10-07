@@ -19,7 +19,7 @@ func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
 
 	tblOidBytes := fmt.Sprintf("%08x", oid)
 
-	return path.Join(tblOidBytes[0:2], tblOidBytes[2:4], tblOidBytes[4:6], fmt.Sprintf("%d", oid))
+	return path.Join(tblOidBytes[6:8], tblOidBytes[4:6], tblOidBytes[2:4], fmt.Sprintf("%d", oid))
 }
 
 // Retry retries a given function until either it returns false, which indicates success, or the number of attempts

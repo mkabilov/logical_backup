@@ -2,6 +2,7 @@ package dbutils
 
 import (
 	"github.com/jackc/pgx"
+	"github.com/jackc/pgx/pgtype"
 )
 
 type Lsn uint64
@@ -21,6 +22,16 @@ func (l *Lsn) Parse(lsn string) error {
 }
 
 type Oid uint32
+
+// implement the Scanner interface in order to allow pgx to read Oid values from the DB.
+func (o *Oid) Scan(src interface{}) error {
+	var result pgtype.OID
+	if err := result.Scan(src); err != nil {
+		return err
+	}
+	*o = Oid(result)
+	return nil
+}
 
 const (
 	InvalidOid Oid = 0

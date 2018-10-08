@@ -64,10 +64,6 @@ type LogicalBackup struct {
 	replMessageWaitTimeout time.Duration
 	statusTimeout          time.Duration
 
-	registeredRelations map[message.NamespacedName]message.Relation
-	relationOIDToNames  map[dbutils.Oid]message.NamespacedName
-	relationOIDToTypes  map[dbutils.Oid]message.Type
-
 	storedFlushLSN dbutils.Lsn
 	startLSN       dbutils.Lsn
 	flushLSN       dbutils.Lsn
@@ -111,9 +107,6 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
-		registeredRelations:    make(map[message.NamespacedName]message.Relation),
-		relationOIDToNames:     make(map[dbutils.Oid]message.NamespacedName),
-		relationOIDToTypes:     make(map[dbutils.Oid]message.Type),
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
@@ -193,7 +186,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 func (b *LogicalBackup) saveTableMessage(tableOID dbutils.Oid, msg []byte) error {
 	bt, ok := b.backupTables[tableOID]
 	if !ok {
-		log.Printf("table is not tracked %s", b.relationOIDToNames[tableOID])
+		log.Printf("table with OID %d is not tracked", tableOID)
 		return nil
 	}
 
@@ -274,36 +267,15 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		//TODO:
 	case message.Truncate:
 		//TODO:
-	case message.Type:
-		if _, ok := b.relationOIDToTypes[v.ID]; !ok {
-			b.relationOIDToTypes[v.ID] = v
-		}
-		b.typeMsg = v.Raw
 	}
 
 	return err
 }
 
-// act on a new relation mesage. We act on table renames, drops and recreations and new tables
+// act on a new relation message. We act on table renames, drops and recreations and new tables
 func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
-
 	// collect what we know about this table
-	relname, isRegisteredOId := b.relationOIDToNames[m.OID]
-	relmessage, isRegisteredName := b.registeredRelations[m.NamespacedName]
-
-	switch {
-	case isRegisteredOId && !isRegisteredName:
-
-		// table has been dropped and recreated
-		b.registerTableRename(m.OID, relname)
-
-	case !isRegisteredOId && isRegisteredName:
-
-		// haven't seen this relation before, but looks like it has been a drop and recreate of the known relation
-		b.registerTableDrop(relmessage.NamespacedName)
-		fallthrough
-
-	case !(isRegisteredOId || isRegisteredName):
+	if _, isRegistered := b.backupTables[m.OID]; !isRegistered {
 		if track, err := b.registerNewTable(m); !track || err != nil {
 			if err != nil {
 				return fmt.Errorf("could not add a backup process for the new table %s: %v", m.NamespacedName, err)
@@ -312,7 +284,6 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 			return nil
 		}
 	}
-
 	return b.saveTableMessage(m.OID, m.Raw)
 }
 
@@ -328,33 +299,10 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 		return false, err
 	}
 
-	b.registeredRelations[m.NamespacedName] = m
-	b.relationOIDToNames[m.OID] = m.NamespacedName
 	b.backupTables[m.OID] = tb
 
 	log.Printf("registered new table with oid %d and name %v", m.OID, m.NamespacedName)
 	return true, nil
-}
-
-func (b *LogicalBackup) registerTableDrop(name message.NamespacedName) {
-	oldOid := b.registeredRelations[name].OID
-	tb := b.backupTables[oldOid]
-
-	// we can still continue processing messages if we failed to remove old data for the relation
-	if err := tb.Truncate(); err != nil {
-		log.Printf("could not truncate backup data for the dropped relation %s: %v", name, err)
-	}
-	// TODO: cancel a running existing basebackup
-
-	delete(b.registeredRelations, name)
-	delete(b.relationOIDToNames, oldOid)
-	delete(b.backupTables, oldOid)
-}
-
-func (b *LogicalBackup) registerTableRename(oid dbutils.Oid, newname message.NamespacedName) {
-	oldname := b.relationOIDToNames[oid]
-	b.registeredRelations[newname] = b.registeredRelations[oldname]
-	delete(b.registeredRelations, oldname)
 }
 
 func (b *LogicalBackup) sendStatus() error {

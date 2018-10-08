@@ -29,6 +29,7 @@ const (
 	applicationName = "logical_backup"
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
+	oidNameMapFile  = "oid2name.map"
 
 	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
@@ -37,6 +38,16 @@ const (
 	cUpdate
 	cDelete
 )
+
+type NameChangeHistory struct {
+	Name message.NamespacedName
+	Lsn  dbutils.Lsn
+}
+
+type OidToName struct {
+	IsChanged bool
+	Changes   map[dbutils.Oid][]NameChangeHistory
+}
 
 type StateInfo struct {
 	Timestamp  time.Time
@@ -55,7 +66,8 @@ type LogicalBackup struct {
 
 	pluginArgs []string
 
-	backupTables map[dbutils.Oid]tablebackup.TableBackuper
+	backupTables     map[dbutils.Oid]tablebackup.TableBackuper
+	tableNameChanges OidToName
 
 	dbCfg    pgx.ConnConfig
 	replConn *pgx.ReplicationConn // connection for logical replication
@@ -108,6 +120,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
+		tableNameChanges:       OidToName{Changes: make(map[dbutils.Oid][]NameChangeHistory)},
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
@@ -255,6 +268,14 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 			b.bytesWritten += ln
 		}
+		// if there were any changes in the table names, flush the map file
+		if b.tableNameChanges.IsChanged {
+			if err := b.flushOidNameMap(); err != nil {
+				log.Printf("could not flush the oid to map file: %v", err)
+			} else {
+				b.tableNameChanges.IsChanged = false
+			}
+		}
 
 		if !b.cfg.SendStatusOnCommit {
 			break
@@ -276,6 +297,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 // act on a new relation message. We act on table renames, drops and recreations and new tables
 func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
+	var lastEntry NameChangeHistory
 	if _, isRegistered := b.backupTables[m.OID]; !isRegistered {
 		if track, err := b.registerNewTable(m); !track || err != nil {
 			if err != nil {
@@ -284,6 +306,14 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 			// instructed not to track this table
 			return nil
 		}
+	}
+	if b.tableNameChanges.Changes[m.OID] != nil {
+		lastEntry = b.tableNameChanges.Changes[m.OID][len(b.tableNameChanges.Changes[m.OID])-1]
+	}
+	if b.tableNameChanges.Changes[m.OID] == nil || lastEntry.Name != m.NamespacedName {
+		b.tableNameChanges.Changes[m.OID] = append(b.tableNameChanges.Changes[m.OID],
+			NameChangeHistory{Name: m.NamespacedName, Lsn: b.flushLSN})
+		b.tableNameChanges.IsChanged = true
 	}
 	return b.saveTableMessage(m.OID, m.Raw)
 }
@@ -680,4 +710,14 @@ func (b *LogicalBackup) Run() {
 			return
 		}
 	}()
+}
+
+func (b *LogicalBackup) flushOidNameMap() error {
+	fp, err := os.OpenFile(path.Join(b.cfg.ArchiveDir, oidNameMapFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return err
+	}
+	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.Changes)
+
+	return err
 }

@@ -391,9 +391,12 @@ func (t *TableBackup) Files() int {
 }
 
 func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
-	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
+	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", uint64(newLSN)))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
-	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
+	if _, err := os.Stat(filename); t.lastLSN == newLSN || !os.IsNotExist(err) {
+		if err != nil {
+			fmt.Printf("could not stat %q: %s", filename, err)
+		}
 		t.filenamePostfix++
 	} else {
 		t.filenamePostfix = 0

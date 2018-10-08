@@ -267,6 +267,8 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		//TODO:
 	case message.Truncate:
 		//TODO:
+	case message.Type:
+		//TODO: consider writing this message to all tables in a transaction as a safety measure during restore.
 	}
 
 	return err
@@ -274,7 +276,6 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 // act on a new relation message. We act on table renames, drops and recreations and new tables
 func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
-	// collect what we know about this table
 	if _, isRegistered := b.backupTables[m.OID]; !isRegistered {
 		if track, err := b.registerNewTable(m); !track || err != nil {
 			if err != nil {

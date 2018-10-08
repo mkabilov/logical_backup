@@ -39,20 +39,6 @@ type DumpInfo struct {
 	BackupDuration float64   `json:"BackupDuration"`
 }
 
-type RelationNameWithLSN struct {
-	Name         NamespacedName
-	ValidFromLSN dbutils.Lsn
-}
-
-type OidRelationMap struct {
-	Oid      dbutils.Oid
-	Relation []RelationNameWithLSN
-}
-
-type OidMappingFile struct {
-	Relations []OidRelationMap
-}
-
 type Message interface {
 	msg()
 }

@@ -365,7 +365,12 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 		if err != nil {
 			return fmt.Errorf("could not stat destination file %q: %s", destFile, err)
 		}
-		if st.Size() == 0 {
+		// for the basebackup we always come up with the same path, and therefore, needs to remove the previous backup
+		// if we fail, it is not an issue, since we have both basebackup and info file in the staging directory.
+		// TODO: make sure we properly archive the leftovers of.copy and info file on restart
+		if basename := path.Base(destFile); basename == basebackupFilename ||
+			basename == tableInfoFilename ||
+			st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
 			log.Printf("destination file is not empty %q; skipping", destFile)

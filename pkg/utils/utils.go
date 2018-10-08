@@ -12,7 +12,6 @@ import (
 )
 
 func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
-
 	if oid == dbutils.InvalidOid {
 		panic(fmt.Sprintf("requested table directories for the table %s with invalid oid", tbl))
 	}

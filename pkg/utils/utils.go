@@ -2,13 +2,13 @@ package utils
 
 import (
 	"fmt"
-	"github.com/ikitiki/logical_backup/pkg/message"
 	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
+	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
 func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {

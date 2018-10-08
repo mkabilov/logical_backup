@@ -357,17 +357,20 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 		log.Printf("source file doesn't exist: %q; skipping", sourceFile)
 		return nil
+	} else if err != nil {
+		return fmt.Errorf("could not stat source file %q: %v", sourceFile, err)
 	}
 
-	if st, err := os.Stat(destFile); os.IsExist(err) {
+	if st, err := os.Stat(destFile); !os.IsNotExist(err) {
+		if err != nil {
+			return fmt.Errorf("could not stat destination file %q: %s", destFile, err)
+		}
 		if st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
 			log.Printf("destination file is not empty %q; skipping", destFile)
 			return nil
 		}
-	} else if err != nil {
-		return fmt.Errorf("could not stat %s: %v", destFile, err)
 	}
 
 	if _, err := copyFile(sourceFile, destFile, fsync); err != nil {

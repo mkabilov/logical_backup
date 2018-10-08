@@ -33,7 +33,10 @@ func (t *TableBackup) RunBasebackup() error {
 
 	log.Printf("Starting base backup of %s", t)
 	tempFilepath := path.Join(t.tempDir, t.infoFilename+".new")
-	if _, err := os.Stat(tempFilepath); os.IsExist(err) {
+	if _, err := os.Stat(tempFilepath); !os.IsNotExist(err) {
+		if err != nil {
+			return fmt.Errorf("could not stat %q: %v", tempFilepath, err)
+		}
 		os.Remove(tempFilepath)
 	}
 
@@ -320,7 +323,10 @@ func (t *TableBackup) copyDump() error {
 	}
 
 	tempFilename := path.Join(t.tempDir, t.basebackupFilename+".new")
-	if _, err := os.Stat(tempFilename); os.IsExist(err) {
+	if _, err := os.Stat(tempFilename); !os.IsNotExist(err) {
+		if err != nil {
+			return fmt.Errorf("could not stat %q: %v", tempFilename, err)
+		}
 		os.Remove(tempFilename)
 	}
 

@@ -64,10 +64,6 @@ type LogicalBackup struct {
 	replMessageWaitTimeout time.Duration
 	statusTimeout          time.Duration
 
-	relations     map[message.NamespacedName]message.Relation
-	relationNames map[dbutils.Oid]message.NamespacedName
-	types         map[dbutils.Oid]message.Type
-
 	storedFlushLSN dbutils.Lsn
 	startLSN       dbutils.Lsn
 	flushLSN       dbutils.Lsn
@@ -111,9 +107,6 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		dbCfg:                  pgxConn,
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
-		relations:              make(map[message.NamespacedName]message.Relation),
-		relationNames:          make(map[dbutils.Oid]message.NamespacedName),
-		types:                  make(map[dbutils.Oid]message.Type),
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
@@ -193,7 +186,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 func (b *LogicalBackup) saveTableMessage(tableOID dbutils.Oid, msg []byte) error {
 	bt, ok := b.backupTables[tableOID]
 	if !ok {
-		log.Printf("table is not tracked %s", b.relationNames[tableOID])
+		log.Printf("table with OID %d is not tracked", tableOID)
 		return nil
 	}
 
@@ -232,47 +225,8 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 	switch v := m.(type) {
 	case message.Relation:
-		if oldRel, ok := b.relations[v.NamespacedName]; !ok { // new table or renamed
-			if oldTblName, ok := b.relationNames[v.OID]; ok { // renamed table
-				log.Printf("table was renamed %s -> %s", oldTblName, v.NamespacedName)
-				delete(b.relations, oldTblName)
-				delete(b.relationNames, v.OID)
+		err = b.processRelationMessage(v)
 
-				err = b.saveTableMessage(v.OID, v.Raw)
-			} else { // new table
-				if _, ok := b.backupTables[v.OID]; !ok { // not tracking
-					if b.cfg.TrackNewTables {
-						log.Printf("new table %s", v.NamespacedName)
-
-						tb, tErr := tablebackup.New(b.ctx, b.waitGr, b.cfg, v.NamespacedName, b.dbCfg, b.basebackupQueue)
-						if tErr != nil {
-							err = fmt.Errorf("could not init tablebackup: %v", tErr)
-						} else {
-							b.backupTables[v.OID] = tb
-						}
-					} else {
-						log.Printf("skipping new table %s due to trackNewTables = false", v.NamespacedName)
-					}
-				}
-			}
-		} else { // existing table
-			if oldRel.OID != v.OID { // dropped and created again
-				log.Printf("table was dropped and created again %s", v.NamespacedName)
-				bt, ok := b.backupTables[oldRel.OID]
-				if !ok {
-					// table is not tracked — skip it
-					break
-				}
-				err = bt.Truncate()
-
-				b.backupTables[v.OID] = b.backupTables[oldRel.OID]
-			} else {
-				err = b.saveTableMessage(v.OID, v.Raw)
-			}
-		}
-
-		b.relations[v.NamespacedName] = v
-		b.relationNames[v.OID] = v.NamespacedName
 	case message.Insert:
 		b.msgCnt[cInsert]++
 
@@ -314,13 +268,42 @@ func (b *LogicalBackup) handler(m message.Message) error {
 	case message.Truncate:
 		//TODO:
 	case message.Type:
-		if _, ok := b.types[v.ID]; !ok {
-			b.types[v.ID] = v
-		}
-		b.typeMsg = v.Raw
+		//TODO: consider writing this message to all tables in a transaction as a safety measure during restore.
 	}
 
 	return err
+}
+
+// act on a new relation message. We act on table renames, drops and recreations and new tables
+func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
+	if _, isRegistered := b.backupTables[m.OID]; !isRegistered {
+		if track, err := b.registerNewTable(m); !track || err != nil {
+			if err != nil {
+				return fmt.Errorf("could not add a backup process for the new table %s: %v", m.NamespacedName, err)
+			}
+			// instructed not to track this table
+			return nil
+		}
+	}
+	return b.saveTableMessage(m.OID, m.Raw)
+}
+
+func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
+	if !b.cfg.TrackNewTables {
+		log.Printf("skip the table with oid %d and name %v because we are configured not to track new tables",
+			m.OID, m.NamespacedName)
+		return false, nil
+	}
+
+	tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, m.NamespacedName, m.OID, b.dbCfg, b.basebackupQueue)
+	if err != nil {
+		return false, err
+	}
+
+	b.backupTables[m.OID] = tb
+
+	log.Printf("registered new table with oid %d and name %v", m.OID, m.NamespacedName)
+	return true, nil
 }
 
 func (b *LogicalBackup) sendStatus() error {
@@ -583,7 +566,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn)
 		}
 
-		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, t.name, b.dbCfg, b.basebackupQueue)
+		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, t.name, t.oid, b.dbCfg, b.basebackupQueue)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}

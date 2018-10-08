@@ -57,7 +57,7 @@ type TableBackup struct {
 	wait *sync.WaitGroup
 
 	// Table info
-	oid uint32
+	oid dbutils.Oid
 
 	// Basebackup
 	tx    *pgx.Tx
@@ -100,13 +100,13 @@ type TableBackup struct {
 	archiveFilesQueue *queue.Queue
 }
 
-//TODO: maybe use oid instead of schema-name pair?
-func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName,
+func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.Oid,
 	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) {
-	tableDir := utils.TableDir(tbl)
+	tableDir := utils.TableDir(tbl, oid)
 
 	tb := TableBackup{
 		NamespacedName:      tbl,
+		oid:                 oid,
 		ctx:                 ctx,
 		wait:                group,
 		sleepBetweenBackups: time.Second * 3,
@@ -357,17 +357,25 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 		log.Printf("source file doesn't exist: %q; skipping", sourceFile)
 		return nil
+	} else if err != nil {
+		return fmt.Errorf("could not stat source file %q: %v", sourceFile, err)
 	}
 
-	if st, err := os.Stat(destFile); os.IsExist(err) {
-		if st.Size() == 0 {
+	if st, err := os.Stat(destFile); !os.IsNotExist(err) {
+		if err != nil {
+			return fmt.Errorf("could not stat destination file %q: %s", destFile, err)
+		}
+		// for the basebackup we always come up with the same path, and therefore, needs to remove the previous backup
+		// if we fail, it is not an issue, since we have both basebackup and info file in the staging directory.
+		// TODO: make sure we properly archive the leftovers of.copy and info file on restart
+		if basename := path.Base(destFile); basename == basebackupFilename ||
+			basename == tableInfoFilename ||
+			st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
 			log.Printf("destination file is not empty %q; skipping", destFile)
 			return nil
 		}
-	} else if err != nil {
-		return fmt.Errorf("could not stat %s: %v", destFile, err)
 	}
 
 	if _, err := copyFile(sourceFile, destFile, fsync); err != nil {
@@ -388,9 +396,12 @@ func (t *TableBackup) Files() int {
 }
 
 func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
-	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", newLSN))
+	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", uint64(newLSN)))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
-	if _, err := os.Stat(filename); t.lastLSN == newLSN || os.IsExist(err) {
+	if _, err := os.Stat(filename); t.lastLSN == newLSN || !os.IsNotExist(err) {
+		if err != nil {
+			fmt.Printf("could not stat %q: %s", filename, err)
+		}
 		t.filenamePostfix++
 	} else {
 		t.filenamePostfix = 0

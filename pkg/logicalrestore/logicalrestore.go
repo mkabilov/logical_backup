@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
 
+	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/decoder"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
@@ -72,7 +73,7 @@ type LogicalRestorer interface {
 type LogicalRestore struct {
 	message.NamespacedName
 
-	startLSN    uint64
+	startLSN    dbutils.Lsn
 	columnNames []string
 	relInfo     message.Relation
 
@@ -153,19 +154,22 @@ func (r *LogicalRestore) rollback() error {
 }
 
 func (r *LogicalRestore) infoFilepath() string {
-	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName), "info.yaml")
+	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName, dbutils.InvalidOid), "info.yaml")
 }
 
 func (r *LogicalRestore) dumpFilepath() string {
-	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName), "basebackup.copy")
+	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName, dbutils.InvalidOid), "basebackup.copy")
 }
 
 func (r *LogicalRestore) deltaDir() string {
-	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName), "deltas")
+	return path.Join(r.baseDir, utils.TableDir(r.NamespacedName, dbutils.InvalidOid), "deltas")
 }
 
 func (r *LogicalRestore) loadInfo() error {
-	var info message.DumpInfo
+	var (
+		info message.DumpInfo
+		lsn  dbutils.Lsn
+	)
 	fp, err := os.OpenFile(r.infoFilepath(), os.O_RDONLY, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("could not open file: %v", err)
@@ -176,8 +180,7 @@ func (r *LogicalRestore) loadInfo() error {
 		return fmt.Errorf("could not load dump info: %v", err)
 	}
 
-	lsn, err := pgx.ParseLSN(info.StartLSN)
-	if err != nil {
+	if err := lsn.Parse(info.StartLSN); err != nil {
 		return fmt.Errorf("could not parse lsn: %v", err)
 	}
 	r.startLSN = lsn

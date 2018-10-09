@@ -25,7 +25,6 @@ func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
 // Retry retries a given function until either it returns false, which indicates success, or the number of attempts
 // reach the limit, or the global timeout is reached. The cool-off period between attempts is passed as well.
 func Retry(fn func() (bool, error), numberOfAttempts int, timeBetweenAttempts time.Duration, totalTimeout time.Duration) error {
-
 	var (
 		globalTicker = time.NewTicker(totalTimeout)
 		fail         = true
@@ -50,6 +49,7 @@ func Retry(fn func() (bool, error), numberOfAttempts int, timeBetweenAttempts ti
 	if timeout {
 		return fmt.Errorf("did not succeed after %s", totalTimeout)
 	}
+
 	return fmt.Errorf("did not succeed after %d attempts", numberOfAttempts)
 }
 
@@ -61,6 +61,7 @@ func GetLSNFromDeltaFilename(filename string) (dbutils.Lsn, error) {
 	}
 
 	lsn, err := strconv.ParseUint(lsnStr, 16, 64)
+
 	return dbutils.Lsn(lsn), err
 }
 
@@ -70,12 +71,13 @@ func SyncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
 	}
 
 	// sync the directory entry
-	dP, err := os.Open(parentDirectoryName)
-	defer dP.Close()
+	dp, err := os.Open(parentDirectoryName)
 	if err != nil {
 		return fmt.Errorf("could not open directory %s to sync: %v", parentDirectoryName, err)
 	}
-	if err = dP.Sync(); err != nil {
+	defer dp.Close()
+
+	if err = dp.Sync(); err != nil {
 		return fmt.Errorf("could not sync directory %s: %v", err)
 	}
 

@@ -40,14 +40,14 @@ const (
 	cDelete
 )
 
-type NameChangeHistory struct {
+type NameChangeHistoryEntry struct {
 	Name message.NamespacedName
 	Lsn  dbutils.Lsn
 }
 
 type OidToName struct {
-	IsChanged bool
-	Changes   map[dbutils.Oid][]NameChangeHistory
+	IsChanged         bool
+	NameChangeHistory map[dbutils.Oid][]NameChangeHistoryEntry
 }
 
 type StateInfo struct {
@@ -121,7 +121,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
-		tableNameChanges:       OidToName{Changes: make(map[dbutils.Oid][]NameChangeHistory)},
+		tableNameChanges:       OidToName{NameChangeHistory: make(map[dbutils.Oid][]NameChangeHistoryEntry)},
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
@@ -716,7 +716,7 @@ func (b *LogicalBackup) flushOidNameMap() error {
 	if err != nil {
 		return err
 	}
-	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.Changes)
+	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.NameChangeHistory)
 	if err == nil {
 		b.tableNameChanges.IsChanged = false
 	}
@@ -728,14 +728,14 @@ func (b *LogicalBackup) flushOidNameMap() error {
 }
 
 func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.NamespacedName) {
-	var lastEntry NameChangeHistory
+	var lastEntry NameChangeHistoryEntry
 
-	if b.tableNameChanges.Changes[oid] != nil {
-		lastEntry = b.tableNameChanges.Changes[oid][len(b.tableNameChanges.Changes[oid])-1]
+	if b.tableNameChanges.NameChangeHistory[oid] != nil {
+		lastEntry = b.tableNameChanges.NameChangeHistory[oid][len(b.tableNameChanges.NameChangeHistory[oid])-1]
 	}
-	if b.tableNameChanges.Changes[oid] == nil || lastEntry.Name != name {
-		b.tableNameChanges.Changes[oid] = append(b.tableNameChanges.Changes[oid],
-			NameChangeHistory{Name: name, Lsn: b.flushLSN})
+	if b.tableNameChanges.NameChangeHistory[oid] == nil || lastEntry.Name != name {
+		b.tableNameChanges.NameChangeHistory[oid] = append(b.tableNameChanges.NameChangeHistory[oid],
+			NameChangeHistoryEntry{Name: name, Lsn: b.flushLSN})
 		b.tableNameChanges.IsChanged = true
 	}
 }

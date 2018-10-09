@@ -24,6 +24,8 @@ type Config struct {
 	ArchiveDir                             string         `yaml:"archiveDir"`
 	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
 	ArchiverTimeout                        time.Duration  `yaml:"archiverTimeout"`
+	PrometheusPort                         int            `yaml:"prometheusPort"`
+	PrometheusMetricsCollectionInterval    time.Duration  `yaml:"prometheusMetricsCollectionInterval"`
 }
 
 func New(filename string) (*Config, error) {

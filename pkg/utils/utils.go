@@ -24,23 +24,36 @@ func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
 
 // Retry retries a given function until either it returns false, which indicates success, or the number of attempts
 // reach the limit, or the global timeout is reached. The cool-off period between attempts is passed as well.
+// The cancellation should generally be handled outside of either this function. In other words, if total time is set
+// to a significantly large value, there should be an external mechanism to terminate the routine to be retried with an
+// error.
 func Retry(fn func() (bool, error), numberOfAttempts int, timeBetweenAttempts time.Duration, totalTimeout time.Duration) error {
 	var (
-		globalTicker = time.NewTicker(totalTimeout)
+		globalTicker *time.Ticker
 		fail         = true
 		timeout      bool
 		err          error
 	)
-
+	if totalTimeout > 0 {
+		globalTicker = time.NewTicker(totalTimeout)
+		defer globalTicker.Stop()
+	}
+loop:
 	for i := 0; i < numberOfAttempts; i++ {
 		if fail, err = fn(); err != nil || !fail {
 			break
 		}
-		select {
-		case <-time.After(timeBetweenAttempts):
-		case <-globalTicker.C:
-			timeout = true
-			break
+		if totalTimeout > 0 && globalTicker != nil {
+			select {
+			case <-time.After(timeBetweenAttempts):
+			case <-globalTicker.C:
+				timeout = true
+				break loop
+			}
+		} else {
+			select {
+			case <-time.After(timeBetweenAttempts):
+			}
 		}
 	}
 	if !fail || err != nil {

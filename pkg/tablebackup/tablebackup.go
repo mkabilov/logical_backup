@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
+	"github.com/ikitiki/logical_backup/pkg/prometheus"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/utils"
 )
@@ -37,10 +37,13 @@ const (
 type TableBackuper interface {
 	TableBaseBackup
 
-	SaveRawMessage([]byte, dbutils.Lsn) (uint64, error)
+	WriteDelta([]byte, dbutils.Lsn) (uint64, error)
 	Files() int
 	Truncate() error
 	String() string
+	ID() dbutils.Oid
+	TextID() string
+	SetTextID(name message.NamespacedName)
 }
 
 type TableBaseBackup interface {
@@ -57,7 +60,8 @@ type TableBackup struct {
 	wait *sync.WaitGroup
 
 	// Table info
-	oid dbutils.Oid
+	oid         dbutils.Oid
+	currentName message.NamespacedName
 
 	// Basebackup
 	tx    *pgx.Tx
@@ -72,6 +76,7 @@ type TableBackup struct {
 	infoFilename       string
 
 	// Deltas
+	// TODO: should we get rid of those altogether in favor of Prometheus?
 	deltaCnt             int
 	segmentsCnt          int
 	deltasSinceBackupCnt int
@@ -98,10 +103,11 @@ type TableBackup struct {
 	msgLen          []byte
 
 	archiveFilesQueue *queue.Queue
+	prom              *promexporter.PrometheusExporter
 }
 
 func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.Oid,
-	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue) (*TableBackup, error) {
+	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom *promexporter.PrometheusExporter) (*TableBackup, error) {
 	tableDir := utils.TableDir(tbl, oid)
 
 	tb := TableBackup{
@@ -119,6 +125,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 		msgLen:              make([]byte, 8),
 		archiveFilesQueue:   queue.New(ctx),
 		segmentBufferMutex:  &sync.Mutex{},
+		prom:                prom,
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -136,7 +143,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 	return &tb, nil
 }
 
-func (t *TableBackup) SaveRawMessage(msg []byte, lsn dbutils.Lsn) (uint64, error) {
+func (t *TableBackup) WriteDelta(msg []byte, lsn dbutils.Lsn) (uint64, error) {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
 
@@ -293,7 +300,10 @@ func (t *TableBackup) archiver() {
 				err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
 				if err != nil {
 					log.Printf("could not archive %s: %v", fname, err)
+					continue
 				}
+				t.prom.Inc(promexporter.FilesArchivedCounter, nil)
+				t.prom.Inc(promexporter.PerTablesFilesArchivedCounter, []string{t.ID().String(), t.TextID()})
 			}
 		}
 	}
@@ -320,7 +330,10 @@ func (t *TableBackup) janitor() {
 			}
 			if err := t.archiveCurrentSegment("timeout"); err != nil {
 				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
+				continue
 			}
+			t.prom.Inc(promexporter.FilesArchivedTimeoutCounter, nil)
+			t.prom.Inc(promexporter.PerTableFilesArchivedTimeoutCounter, []string{t.ID().String(), t.TextID()})
 		}
 	}
 }
@@ -503,61 +516,17 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 	return false, name
 }
 
-func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation, error) {
-	var (
-		rel            message.Relation
-		relOid         dbutils.Oid
-		relRepIdentity pgtype.BPChar
-	)
+// TODO: consider providing a pair of values identifying the table for prometheus in a single function call
+func (tb *TableBackup) ID() dbutils.Oid {
+	return tb.oid
+}
 
-	row := tx.QueryRow(`
-		SELECT c.oid, c.relreplident::char 
-		FROM pg_catalog.pg_class c
-		LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`,
-		tbl.Namespace,
-		tbl.Name)
+func (tb *TableBackup) TextID() string {
+	return tb.currentName.UnquotedString()
+}
 
-	if err := row.Scan(&relOid, &relRepIdentity); err != nil {
-		return rel, fmt.Errorf("could not fetch table info: %v", err)
-	}
-
-	rows, err := tx.Query(`
-	SELECT a.attname, a.atttypid, a.atttypmod, format_type(a.atttypid, a.atttypmod)
-	FROM pg_catalog.pg_attribute a  
-	WHERE a.attrelid = $1 AND a.attnum > 0 AND a.attisdropped = false
-	ORDER BY a.attnum`, relOid)
-	if err != nil {
-		return rel, fmt.Errorf("could not exec query: %v", err)
-	}
-	columns := make([]message.Column, 0)
-
-	for rows.Next() {
-		var (
-			name       string
-			attType    uint32
-			typMod     int32
-			formatType string
-		)
-		if err := rows.Scan(&name, &attType, &typMod, &formatType); err != nil {
-			return rel, fmt.Errorf("could not scan row: %v", err)
-		}
-		columns = append(columns, message.Column{
-			IsKey:         false,
-			Name:          name,
-			TypeOID:       dbutils.Oid(attType),
-			Mode:          typMod,
-			FormattedType: formatType,
-		})
-	}
-
-	rel.Namespace = tbl.Namespace
-	rel.Name = tbl.Name
-	rel.Columns = columns
-	rel.ReplicaIdentity = message.ReplicaIdentity(relRepIdentity.String[0])
-	rel.OID = relOid
-
-	return rel, nil
+func (tb *TableBackup) SetTextID(name message.NamespacedName) {
+	tb.currentName = name
 }
 
 func copyFile(src, dst string, fsync bool) (int64, error) {

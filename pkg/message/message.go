@@ -379,6 +379,10 @@ func (n NamespacedName) String() string {
 	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
 }
 
+func (n NamespacedName) UnquotedString() string {
+	return strings.Join([]string{n.Namespace, n.Name}, ".")
+}
+
 func (n NamespacedName) Sanitize() string {
 	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
 }

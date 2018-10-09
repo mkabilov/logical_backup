@@ -21,6 +21,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
+	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 type cmdType int
@@ -29,6 +30,7 @@ const (
 	applicationName = "logical_backup"
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
+	oidNameMapFile  = "oid2name.map"
 
 	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
@@ -37,6 +39,16 @@ const (
 	cUpdate
 	cDelete
 )
+
+type nameAtLsn struct {
+	Name message.NamespacedName
+	Lsn  dbutils.Lsn
+}
+
+type oidToName struct {
+	isChanged         bool
+	nameChangeHistory map[dbutils.Oid][]nameAtLsn
+}
 
 type StateInfo struct {
 	Timestamp  time.Time
@@ -55,7 +67,8 @@ type LogicalBackup struct {
 
 	pluginArgs []string
 
-	backupTables map[dbutils.Oid]tablebackup.TableBackuper
+	backupTables     map[dbutils.Oid]tablebackup.TableBackuper
+	tableNameChanges oidToName
 
 	dbCfg    pgx.ConnConfig
 	replConn *pgx.ReplicationConn // connection for logical replication
@@ -108,6 +121,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
+		tableNameChanges:       oidToName{nameChangeHistory: make(map[dbutils.Oid][]nameAtLsn)},
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
@@ -255,6 +269,10 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 			b.bytesWritten += ln
 		}
+		// if there were any changes in the table names, flush the map file
+		if err := b.flushOidNameMap(); err != nil {
+			log.Printf("could not flush the oid to map file: %v", err)
+		}
 
 		if !b.cfg.SendStatusOnCommit {
 			break
@@ -285,6 +303,7 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 			return nil
 		}
 	}
+	b.maybeRegisterNewName(m.OID, m.NamespacedName)
 	return b.saveTableMessage(m.OID, m.Raw)
 }
 
@@ -571,8 +590,13 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
 
+		// register the new table OID to name mapping
+		b.maybeRegisterNewName(t.oid, tb.NamespacedName)
 		b.backupTables[t.oid] = tb
+
 	}
+	// flush the OID to name mapping
+	b.flushOidNameMap()
 
 	return nil
 }
@@ -680,4 +704,38 @@ func (b *LogicalBackup) Run() {
 			return
 		}
 	}()
+}
+
+func (b *LogicalBackup) flushOidNameMap() error {
+	if !b.tableNameChanges.isChanged {
+		return nil
+	}
+	mapFilePath := path.Join(b.cfg.ArchiveDir, oidNameMapFile)
+	fp, err := os.OpenFile(mapFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	defer fp.Close()
+	if err != nil {
+		return err
+	}
+	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.nameChangeHistory)
+	if err == nil {
+		b.tableNameChanges.isChanged = false
+	}
+	if err := utils.SyncFileAndDirectory(fp, mapFilePath, b.cfg.ArchiveDir); err != nil {
+		return fmt.Errorf("could not sync oid to name map file %q: %v", mapFilePath, err)
+	}
+
+	return err
+}
+
+func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.NamespacedName) {
+	var lastEntry nameAtLsn
+
+	if b.tableNameChanges.nameChangeHistory[oid] != nil {
+		lastEntry = b.tableNameChanges.nameChangeHistory[oid][len(b.tableNameChanges.nameChangeHistory[oid])-1]
+	}
+	if b.tableNameChanges.nameChangeHistory[oid] == nil || lastEntry.Name != name {
+		b.tableNameChanges.nameChangeHistory[oid] = append(b.tableNameChanges.nameChangeHistory[oid],
+			nameAtLsn{Name: name, Lsn: b.flushLSN})
+		b.tableNameChanges.isChanged = true
+	}
 }

@@ -194,7 +194,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 
 	if t.cfg.Fsync {
 		// sync the file data itself
-		if err := syncFileAndDirectory(fp, deltaPath, t.tempDir); err != nil {
+		if err := utils.SyncFileAndDirectory(fp, deltaPath, t.tempDir); err != nil {
 			return err
 		}
 	}
@@ -399,7 +399,7 @@ func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
 	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", uint64(newLSN)))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || !os.IsNotExist(err) {
-		if err != nil {
+		if err != nil && !os.IsNotExist(err) {
 			fmt.Printf("could not stat %q: %s", filename, err)
 		}
 		t.filenamePostfix++
@@ -560,24 +560,6 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation
 	return rel, nil
 }
 
-func syncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
-	if err := fp.Sync(); err != nil {
-		return fmt.Errorf("could not sync file %s: %v", path, err)
-	}
-
-	// sync the directory entry
-	dP, err := os.Open(parentDirectoryName)
-	defer dP.Close()
-	if err != nil {
-		return fmt.Errorf("could not open directory %s to sync: %v", parentDirectoryName, err)
-	}
-	if err = dP.Sync(); err != nil {
-		return fmt.Errorf("could not sync directory %s: %v", err)
-	}
-
-	return nil
-}
-
 func copyFile(src, dst string, fsync bool) (int64, error) {
 	sourceFileStat, err := os.Stat(src)
 	if err != nil {
@@ -606,7 +588,7 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 	}
 
 	if fsync {
-		if err = syncFileAndDirectory(destination, dst, path.Dir(dst)); err != nil {
+		if err = utils.SyncFileAndDirectory(destination, dst, path.Dir(dst)); err != nil {
 			return nBytes, fmt.Errorf("could not sync %s: %v", dst, err)
 		}
 	}

@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -61,4 +62,22 @@ func GetLSNFromDeltaFilename(filename string) (dbutils.Lsn, error) {
 
 	lsn, err := strconv.ParseUint(lsnStr, 16, 64)
 	return dbutils.Lsn(lsn), err
+}
+
+func SyncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
+	if err := fp.Sync(); err != nil {
+		return fmt.Errorf("could not sync file %s: %v", path, err)
+	}
+
+	// sync the directory entry
+	dP, err := os.Open(parentDirectoryName)
+	defer dP.Close()
+	if err != nil {
+		return fmt.Errorf("could not open directory %s to sync: %v", parentDirectoryName, err)
+	}
+	if err = dP.Sync(); err != nil {
+		return fmt.Errorf("could not sync directory %s: %v", err)
+	}
+
+	return nil
 }

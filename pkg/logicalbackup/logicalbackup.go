@@ -21,6 +21,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
+	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
 type cmdType int
@@ -269,12 +270,8 @@ func (b *LogicalBackup) handler(m message.Message) error {
 			b.bytesWritten += ln
 		}
 		// if there were any changes in the table names, flush the map file
-		if b.tableNameChanges.IsChanged {
-			if err := b.flushOidNameMap(); err != nil {
-				log.Printf("could not flush the oid to map file: %v", err)
-			} else {
-				b.tableNameChanges.IsChanged = false
-			}
+		if err := b.flushOidNameMap(); err != nil {
+			log.Printf("could not flush the oid to map file: %v", err)
 		}
 
 		if !b.cfg.SendStatusOnCommit {
@@ -297,7 +294,6 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 // act on a new relation message. We act on table renames, drops and recreations and new tables
 func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
-	var lastEntry NameChangeHistory
 	if _, isRegistered := b.backupTables[m.OID]; !isRegistered {
 		if track, err := b.registerNewTable(m); !track || err != nil {
 			if err != nil {
@@ -307,14 +303,7 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 			return nil
 		}
 	}
-	if b.tableNameChanges.Changes[m.OID] != nil {
-		lastEntry = b.tableNameChanges.Changes[m.OID][len(b.tableNameChanges.Changes[m.OID])-1]
-	}
-	if b.tableNameChanges.Changes[m.OID] == nil || lastEntry.Name != m.NamespacedName {
-		b.tableNameChanges.Changes[m.OID] = append(b.tableNameChanges.Changes[m.OID],
-			NameChangeHistory{Name: m.NamespacedName, Lsn: b.flushLSN})
-		b.tableNameChanges.IsChanged = true
-	}
+	b.maybeRegisterNewName(m.OID, m.NamespacedName)
 	return b.saveTableMessage(m.OID, m.Raw)
 }
 
@@ -601,8 +590,13 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
 
+		// register the new table OID to name mapping
+		b.maybeRegisterNewName(t.oid, tb.NamespacedName)
 		b.backupTables[t.oid] = tb
+
 	}
+	// flush the OID to name mapping
+	b.flushOidNameMap()
 
 	return nil
 }
@@ -713,11 +707,35 @@ func (b *LogicalBackup) Run() {
 }
 
 func (b *LogicalBackup) flushOidNameMap() error {
-	fp, err := os.OpenFile(path.Join(b.cfg.ArchiveDir, oidNameMapFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if !b.tableNameChanges.IsChanged {
+		return nil
+	}
+	mapFilePath := path.Join(b.cfg.ArchiveDir, oidNameMapFile)
+	fp, err := os.OpenFile(mapFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	defer fp.Close()
 	if err != nil {
 		return err
 	}
 	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.Changes)
+	if err == nil {
+		b.tableNameChanges.IsChanged = false
+	}
+	if err := utils.SyncFileAndDirectory(fp, mapFilePath, b.cfg.ArchiveDir); err != nil {
+		return fmt.Errorf("could not sync oid to name map file %q: %v", mapFilePath, err)
+	}
 
 	return err
+}
+
+func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.NamespacedName) {
+	var lastEntry NameChangeHistory
+
+	if b.tableNameChanges.Changes[oid] != nil {
+		lastEntry = b.tableNameChanges.Changes[oid][len(b.tableNameChanges.Changes[oid])-1]
+	}
+	if b.tableNameChanges.Changes[oid] == nil || lastEntry.Name != name {
+		b.tableNameChanges.Changes[oid] = append(b.tableNameChanges.Changes[oid],
+			NameChangeHistory{Name: name, Lsn: b.flushLSN})
+		b.tableNameChanges.IsChanged = true
+	}
 }

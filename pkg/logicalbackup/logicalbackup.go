@@ -40,14 +40,14 @@ const (
 	cDelete
 )
 
-type NameChangeHistoryEntry struct {
+type nameAtLsn struct {
 	Name message.NamespacedName
 	Lsn  dbutils.Lsn
 }
 
-type OidToName struct {
-	IsChanged         bool
-	NameChangeHistory map[dbutils.Oid][]NameChangeHistoryEntry
+type oidToName struct {
+	isChanged         bool
+	nameChangeHistory map[dbutils.Oid][]nameAtLsn
 }
 
 type StateInfo struct {
@@ -68,7 +68,7 @@ type LogicalBackup struct {
 	pluginArgs []string
 
 	backupTables     map[dbutils.Oid]tablebackup.TableBackuper
-	tableNameChanges OidToName
+	tableNameChanges oidToName
 
 	dbCfg    pgx.ConnConfig
 	replConn *pgx.ReplicationConn // connection for logical replication
@@ -121,7 +121,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
-		tableNameChanges:       OidToName{NameChangeHistory: make(map[dbutils.Oid][]NameChangeHistoryEntry)},
+		tableNameChanges:       oidToName{nameChangeHistory: make(map[dbutils.Oid][]nameAtLsn)},
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
@@ -707,7 +707,7 @@ func (b *LogicalBackup) Run() {
 }
 
 func (b *LogicalBackup) flushOidNameMap() error {
-	if !b.tableNameChanges.IsChanged {
+	if !b.tableNameChanges.isChanged {
 		return nil
 	}
 	mapFilePath := path.Join(b.cfg.ArchiveDir, oidNameMapFile)
@@ -716,9 +716,9 @@ func (b *LogicalBackup) flushOidNameMap() error {
 	if err != nil {
 		return err
 	}
-	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.NameChangeHistory)
+	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.nameChangeHistory)
 	if err == nil {
-		b.tableNameChanges.IsChanged = false
+		b.tableNameChanges.isChanged = false
 	}
 	if err := utils.SyncFileAndDirectory(fp, mapFilePath, b.cfg.ArchiveDir); err != nil {
 		return fmt.Errorf("could not sync oid to name map file %q: %v", mapFilePath, err)
@@ -728,14 +728,14 @@ func (b *LogicalBackup) flushOidNameMap() error {
 }
 
 func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.NamespacedName) {
-	var lastEntry NameChangeHistoryEntry
+	var lastEntry nameAtLsn
 
-	if b.tableNameChanges.NameChangeHistory[oid] != nil {
-		lastEntry = b.tableNameChanges.NameChangeHistory[oid][len(b.tableNameChanges.NameChangeHistory[oid])-1]
+	if b.tableNameChanges.nameChangeHistory[oid] != nil {
+		lastEntry = b.tableNameChanges.nameChangeHistory[oid][len(b.tableNameChanges.nameChangeHistory[oid])-1]
 	}
-	if b.tableNameChanges.NameChangeHistory[oid] == nil || lastEntry.Name != name {
-		b.tableNameChanges.NameChangeHistory[oid] = append(b.tableNameChanges.NameChangeHistory[oid],
-			NameChangeHistoryEntry{Name: name, Lsn: b.flushLSN})
-		b.tableNameChanges.IsChanged = true
+	if b.tableNameChanges.nameChangeHistory[oid] == nil || lastEntry.Name != name {
+		b.tableNameChanges.nameChangeHistory[oid] = append(b.tableNameChanges.nameChangeHistory[oid],
+			nameAtLsn{Name: name, Lsn: b.flushLSN})
+		b.tableNameChanges.isChanged = true
 	}
 }

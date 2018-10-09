@@ -1,6 +1,8 @@
 package dbutils
 
 import (
+	"database/sql/driver"
+
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
 )
@@ -31,6 +33,10 @@ func (o *Oid) Scan(src interface{}) error {
 	}
 	*o = Oid(result)
 	return nil
+}
+
+func (o Oid) Value() (driver.Value, error) {
+	return int64(o), nil
 }
 
 const (

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
@@ -507,7 +506,7 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation
 	var (
 		rel            message.Relation
 		relOid         dbutils.Oid
-		relRepIdentity pgtype.BPChar
+		relRepIdentity message.ReplicaIdentity
 	)
 
 	row := tx.QueryRow(`
@@ -554,7 +553,7 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation
 	rel.Namespace = tbl.Namespace
 	rel.Name = tbl.Name
 	rel.Columns = columns
-	rel.ReplicaIdentity = message.ReplicaIdentity(uint8(relRepIdentity.String[0]))
+	rel.ReplicaIdentity = relRepIdentity
 	rel.OID = relOid
 
 	return rel, nil

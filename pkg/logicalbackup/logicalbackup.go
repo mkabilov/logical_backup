@@ -230,7 +230,7 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 
 	if b.typeMsg != nil {
 		if err := b.WriteCommandDataForTable(bt, b.typeMsg, cType); err != nil {
-			return fmt.Errorf("could not save type message: %v", err)
+			return fmt.Errorf("could not write type message: %v", err)
 		}
 		b.typeMsg = nil
 	}
@@ -243,7 +243,7 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 	}
 
 	if err := b.WriteCommandDataForTable(bt, msg, cmd); err != nil {
-		return fmt.Errorf("could not save message: %v", err)
+		return fmt.Errorf("could not write message: %v", err)
 	}
 
 	return nil

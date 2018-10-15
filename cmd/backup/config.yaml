@@ -12,7 +12,6 @@ archiveDir: /tmp/final
 forceBasebackupAfterInactivityInterval: 24h
 archiverTimeout: 3h
 prometheusPort: 19999
-prometheusMetricsCollectionInterval: 5s
 db:
   host: 127.0.0.1
   port: 5432

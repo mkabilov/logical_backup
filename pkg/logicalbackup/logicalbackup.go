@@ -19,7 +19,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/decoder"
 	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/prometheus"
+	prom "github.com/ikitiki/logical_backup/pkg/prometheus"
 	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
 	"github.com/ikitiki/logical_backup/pkg/utils"
@@ -101,7 +101,7 @@ type LogicalBackup struct {
 	typeMsg          []byte
 
 	srv  http.Server
-	prom *promexporter.PrometheusExporter
+	prom *prom.PrometheusExporter
 }
 
 func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
@@ -141,7 +141,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 			Addr:    fmt.Sprintf(":%d", 8080),                     // TODO: get rid of the hardcoded value
 			Handler: http.TimeoutHandler(mux, time.Second*20, ""), // TODO: get rid of the hardcoded value
 		},
-		prom: promexporter.New(cfg.PrometheusPort),
+		prom: prom.New(cfg.PrometheusPort),
 	}
 
 	if _, err := os.Stat(cfg.TempDir); os.IsNotExist(err) {
@@ -204,7 +204,9 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		return nil, fmt.Errorf("could not prepare tables for backup: %v", err)
 	}
 
-	lb.registerMetrics()
+	if err := lb.registerMetrics(); err != nil {
+		return nil, err
+	}
 
 	return lb, nil
 }
@@ -262,30 +264,30 @@ func (b *LogicalBackup) WriteCommandDataForTable(t tablebackup.TableBackuper, ms
 
 	switch cmd {
 	case cInsert:
-		promType = promexporter.MessageTypeInsert
+		promType = prom.MessageTypeInsert
 	case cUpdate:
-		promType = promexporter.MessageTypeUpdate
+		promType = prom.MessageTypeUpdate
 	case cDelete:
-		promType = promexporter.MessageTypeDelete
+		promType = prom.MessageTypeDelete
 	case cBegin:
-		promType = promexporter.MessageTypeBegin
+		promType = prom.MessageTypeBegin
 	case cCommit:
-		promType = promexporter.MessageTypeCommit
+		promType = prom.MessageTypeCommit
 	case cRelation:
-		promType = promexporter.MessageTypeRelation
+		promType = prom.MessageTypeRelation
 	case cType:
-		promType = promexporter.MessageTypeTypeInfo
+		promType = prom.MessageTypeTypeInfo
 	default:
-		promType = promexporter.MessageTypeUnknown
+		promType = prom.MessageTypeUnknown
 	}
 
-	b.prom.Inc(promexporter.MessageCounter, []string{promType})
-	b.prom.Inc(promexporter.PerTableMessageCounter, []string{t.ID().String(), t.TextID(), promType})
-	b.prom.SetToCurrentTime(promexporter.LastWrittenMessageTimestampGauge, nil)
+	b.prom.Inc(prom.MessageCounter, []string{promType})
+	b.prom.Inc(prom.PerTableMessageCounter, []string{t.ID().String(), t.TextID(), promType})
+	b.prom.SetToCurrentTime(prom.LastWrittenMessageTimestampGauge, nil)
 
-	b.prom.Add(promexporter.TotalBytesWrittenCounter, float64(ln), nil)
-	b.prom.Add(promexporter.PerTableBytesCounter, float64(ln), []string{t.ID().String(), t.TextID()})
-	b.prom.Inc(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+	b.prom.Add(prom.TotalBytesWrittenCounter, float64(ln), nil)
+	b.prom.Add(prom.PerTableBytesCounter, float64(ln), []string{t.ID().String(), t.TextID()})
+	b.prom.Inc(prom.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
 
 	return nil
 }
@@ -320,11 +322,11 @@ func (b *LogicalBackup) handler(m message.Message) error {
 			if err = b.WriteCommandDataForTable(tb, v.Raw, cCommit); err != nil {
 				break
 			}
-			b.prom.Set(promexporter.PerTableLastCommitTimestampGauge, float64(v.Timestamp.Unix()), []string{tb.ID().String(), tb.TextID()})
+			b.prom.Set(prom.PerTableLastCommitTimestampGauge, float64(v.Timestamp.Unix()), []string{tb.ID().String(), tb.TextID()})
 		}
-		b.prom.Inc(promexporter.TransactionCounter, nil)
-		b.prom.Set(promexporter.FlushLSNCGauge, float64(b.flushLSN), nil)
-		b.prom.Set(promexporter.LastCommitTimestampGauge, float64(v.Timestamp.Unix()), nil)
+		b.prom.Inc(prom.TransactionCounter, nil)
+		b.prom.Set(prom.FlushLSNCGauge, float64(b.flushLSN), nil)
+		b.prom.Set(prom.LastCommitTimestampGauge, float64(v.Timestamp.Unix()), nil)
 
 		// if there were any changes in the table names, flush the map file
 		if err := b.flushOidNameMap(); err != nil {
@@ -826,92 +828,103 @@ func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.Names
 	}
 }
 
-func (lb *LogicalBackup) registerMetrics() {
-	var err error
-
-	registerError := func(name string) { log.Printf("could not register %q: %v", name, err) }
-
-	if err = lb.prom.RegisterCounterVector(promexporter.MessageCounter,
-		"total number of messages received",
-		[]string{promexporter.MessageTypeLabel}); err != nil {
-		registerError(promexporter.MessageCounter)
+func (lb *LogicalBackup) registerMetrics() error {
+	registerMetrics := []prom.MetricsToRegister{
+		{
+			prom.MessageCounter,
+			"total number of messages received",
+			[]string{prom.MessageTypeLabel},
+			prom.MetricsCounter,
+		},
+		{
+			prom.TotalBytesWrittenCounter,
+			"total bytes written",
+			nil,
+			prom.MetricsCounter,
+		},
+		{
+			prom.TransactionCounter,
+			"total number of transactions",
+			nil,
+			prom.MetricsCounter,
+		},
+		{
+			prom.FlushLSNCGauge,
+			"last LSN to flush",
+			nil,
+			prom.MetricsGauge,
+		},
+		{
+			prom.LastCommitTimestampGauge,
+			"last commit timestamp",
+			nil,
+			prom.MetricsGauge,
+		},
+		{
+			prom.LastWrittenMessageTimestampGauge,
+			"last written message timestamp",
+			nil,
+			prom.MetricsGauge,
+		},
+		{
+			prom.FilesArchivedCounter,
+			"total files archived",
+			nil,
+			prom.MetricsCounter,
+		},
+		{
+			prom.FilesArchivedTimeoutCounter,
+			"total number of files archived due to a timeout",
+			nil,
+			prom.MetricsCounter,
+		},
+		{
+			prom.PerTableMessageCounter,
+			"per table number of messages written",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel, prom.MessageTypeLabel},
+			prom.MetricsCounterVector,
+		},
+		{
+			prom.PerTableBytesCounter,
+			"per table number of bytes written",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel},
+			prom.MetricsCounterVector,
+		},
+		{
+			prom.PerTablesFilesArchivedCounter,
+			"per table number of segments archived",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel},
+			prom.MetricsCounterVector,
+		},
+		{
+			prom.PerTableFilesArchivedTimeoutCounter,
+			"per table number of segments archived due to a timeout",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel},
+			prom.MetricsCounterVector,
+		},
+		{
+			prom.PerTableLastCommitTimestampGauge,
+			"per table last commit message timestamp",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel},
+			prom.MetricsGaugeVector,
+		},
+		{
+			prom.PerTableLastBackupEndTimestamp,
+			"per table last backup end timestamp",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel},
+			prom.MetricsGaugeVector,
+		},
+		{
+			prom.PerTableMessageSinceLastBackupGauge,
+			"per table number of messages since the last basebackup",
+			[]string{prom.TableOIDLabel, prom.TableNameLabel},
+			prom.MetricsGaugeVector,
+		},
 	}
-
-	if err = lb.prom.RegisterCounter(promexporter.TotalBytesWrittenCounter,
-		"total bytes written"); err != nil {
-		registerError(promexporter.TotalBytesWrittenCounter)
+	for _, m := range registerMetrics {
+		if err := lb.prom.RegisterMetricsItem(&m); err != nil {
+			return fmt.Errorf("could not register prometheus metrics: %v", err)
+		}
 	}
-
-	if err = lb.prom.RegisterCounter(promexporter.TransactionCounter,
-		"total number of transactions"); err != nil {
-		registerError(promexporter.TransactionCounter)
-	}
-
-	if err = lb.prom.RegisterGauge(promexporter.FlushLSNCGauge,
-		"last LSN to flush"); err != nil {
-		registerError(promexporter.FlushLSNCGauge)
-	}
-
-	if err = lb.prom.RegisterGauge(promexporter.LastCommitTimestampGauge,
-		"last commit timestamp"); err != nil {
-		registerError(promexporter.LastCommitTimestampGauge)
-	}
-
-	if err = lb.prom.RegisterGauge(promexporter.LastWrittenMessageTimestampGauge,
-		"last written message timestamp"); err != nil {
-		registerError(promexporter.LastWrittenMessageTimestampGauge)
-	}
-
-	if err = lb.prom.RegisterCounter(promexporter.FilesArchivedCounter,
-		"total files archived"); err != nil {
-		registerError(promexporter.FilesArchivedCounter)
-	}
-
-	if err = lb.prom.RegisterCounter(promexporter.FilesArchivedTimeoutCounter,
-		"total number of files archived due to a timeout"); err != nil {
-		registerError(promexporter.FilesArchivedTimeoutCounter)
-	}
-
-	if err = lb.prom.RegisterCounterVector(promexporter.PerTableMessageCounter,
-		"per table number of messages written",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel, promexporter.MessageTypeLabel}); err != nil {
-		registerError(promexporter.PerTableMessageCounter)
-	}
-
-	if err = lb.prom.RegisterCounterVector(promexporter.PerTableBytesCounter,
-		"per table number of segments written",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel}); err != nil {
-		registerError(promexporter.PerTableBytesCounter)
-	}
-
-	if err = lb.prom.RegisterCounterVector(promexporter.PerTablesFilesArchivedCounter,
-		"per table number of segments archived",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel}); err != nil {
-		registerError(promexporter.PerTablesFilesArchivedCounter)
-	}
-
-	if err = lb.prom.RegisterCounterVector(promexporter.PerTableFilesArchivedTimeoutCounter,
-		"per table number of segments archived due to a timeout",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel}); err != nil {
-		registerError(promexporter.PerTableFilesArchivedTimeoutCounter)
-	}
-
-	if err = lb.prom.RegisterGaugeVector(promexporter.PerTableLastCommitTimestampGauge,
-		"per table last commit message timestamp",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel}); err != nil {
-		registerError(promexporter.PerTableLastCommitTimestampGauge)
-	}
-
-	if err = lb.prom.RegisterGaugeVector(promexporter.PerTableLastBackupEndTimestamp,
-		"per table last backend end timestamp",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel}); err != nil {
-		registerError(promexporter.PerTableLastBackupEndTimestamp)
-	}
-
-	if err = lb.prom.RegisterGaugeVector(promexporter.PerTableMessageSinceLastBackupGauge,
-		"per table number of messages since the last basebackup",
-		[]string{promexporter.TableOIDLabel, promexporter.TableNameLabel}); err != nil {
-		registerError(promexporter.PerTableMessageSinceLastBackupGauge)
-	}
-
+	return nil
 }

@@ -46,6 +46,22 @@ const (
 	MessageTypeUnknown  = "unknown"
 )
 
+type MetricsKind uint8
+
+const (
+	MetricsCounter MetricsKind = iota
+	MetricsCounterVector
+	MetricsGauge
+	MetricsGaugeVector
+)
+
+type MetricsToRegister struct {
+	Name   string
+	Help   string
+	Labels []string
+	Kind   MetricsKind
+}
+
 type PrometheusExporter struct {
 	metrics map[string]interface{}
 	port    int
@@ -62,6 +78,21 @@ func (pe *PrometheusExporter) errorIfExists(name, typeName string) error {
 		return fmt.Errorf("%s with the name %q is already registered", typeName, name)
 	}
 	return nil
+}
+
+func (pe *PrometheusExporter) RegisterMetricsItem(item *MetricsToRegister) error {
+	switch item.Kind {
+	case MetricsCounter:
+		return pe.RegisterCounter(item.Name, item.Help)
+	case MetricsCounterVector:
+		return pe.RegisterCounterVector(item.Name, item.Help, item.Labels)
+	case MetricsGauge:
+		return pe.RegisterGauge(item.Name, item.Help)
+	case MetricsGaugeVector:
+		return pe.RegisterGaugeVector(item.Name, item.Help, item.Labels)
+	default:
+		return fmt.Errorf("unknonw metrics type code to register: %d for item %q", item.Kind, item.Name)
+	}
 }
 
 func (pe *PrometheusExporter) RegisterCounterVector(name, help string, labelNames []string) error {

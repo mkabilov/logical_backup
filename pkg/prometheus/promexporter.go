@@ -67,6 +67,16 @@ type PrometheusExporter struct {
 	port    int
 }
 
+type PrometheusExporterInterface interface {
+	RegisterMetricsItem(item *MetricsToRegister) error
+	Inc(name string, labelValues []string) error
+	Add(name string, addition float64, labelValues []string) error
+	Set(name string, value float64, labelValues []string) error
+	Reset(name string, labelValues []string) error
+	SetToCurrentTime(name string, labelValues []string) error
+	Run(ctx context.Context, wait *sync.WaitGroup, serverStopChan chan struct{})
+}
+
 func New(port int) *PrometheusExporter {
 	metrics := make(map[string]interface{})
 	return &PrometheusExporter{metrics: metrics, port: port}
@@ -84,19 +94,19 @@ func (pe *PrometheusExporter) errorIfExists(name, typeName string) error {
 func (pe *PrometheusExporter) RegisterMetricsItem(item *MetricsToRegister) error {
 	switch item.Kind {
 	case MetricsCounter:
-		return pe.RegisterCounter(item.Name, item.Help)
+		return pe.registerCounter(item.Name, item.Help)
 	case MetricsCounterVector:
-		return pe.RegisterCounterVector(item.Name, item.Help, item.Labels)
+		return pe.registerCounterVector(item.Name, item.Help, item.Labels)
 	case MetricsGauge:
-		return pe.RegisterGauge(item.Name, item.Help)
+		return pe.registerGauge(item.Name, item.Help)
 	case MetricsGaugeVector:
-		return pe.RegisterGaugeVector(item.Name, item.Help, item.Labels)
+		return pe.registerGaugeVector(item.Name, item.Help, item.Labels)
 	default:
 		return fmt.Errorf("unknonw metrics type code to register: %d for item %q", item.Kind, item.Name)
 	}
 }
 
-func (pe *PrometheusExporter) RegisterCounterVector(name, help string, labelNames []string) error {
+func (pe *PrometheusExporter) registerCounterVector(name, help string, labelNames []string) error {
 	if err := pe.errorIfExists(name, "counter vector"); err != nil {
 		return err
 	}
@@ -107,7 +117,7 @@ func (pe *PrometheusExporter) RegisterCounterVector(name, help string, labelName
 	return nil
 }
 
-func (pe *PrometheusExporter) RegisterCounter(name, help string) error {
+func (pe *PrometheusExporter) registerCounter(name, help string) error {
 	if err := pe.errorIfExists(name, "counter"); err != nil {
 		return err
 	}
@@ -117,7 +127,7 @@ func (pe *PrometheusExporter) RegisterCounter(name, help string) error {
 	return nil
 }
 
-func (pe *PrometheusExporter) RegisterGauge(name, help string) error {
+func (pe *PrometheusExporter) registerGauge(name, help string) error {
 	if err := pe.errorIfExists(name, "counter"); err != nil {
 		return err
 	}
@@ -127,7 +137,7 @@ func (pe *PrometheusExporter) RegisterGauge(name, help string) error {
 	return nil
 }
 
-func (pe *PrometheusExporter) RegisterGaugeVector(name, help string, labelNames []string) error {
+func (pe *PrometheusExporter) registerGaugeVector(name, help string, labelNames []string) error {
 	if err := pe.errorIfExists(name, "gauge vector"); err != nil {
 		return err
 	}
@@ -177,6 +187,7 @@ func (pe *PrometheusExporter) Set(name string, value float64, labelValues []stri
 	default:
 		return fmt.Errorf("type %T doesn't support Set", t)
 	}
+
 	return nil
 }
 
@@ -193,6 +204,7 @@ func (pe *PrometheusExporter) SetToCurrentTime(name string, labelValues []string
 	default:
 		return fmt.Errorf("type %T doesn't support SetToCurrentTime", t)
 	}
+
 	return nil
 }
 

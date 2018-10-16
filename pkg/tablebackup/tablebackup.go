@@ -103,11 +103,11 @@ type TableBackup struct {
 	msgLen          []byte
 
 	archiveFilesQueue *queue.Queue
-	prom              *promexporter.PrometheusExporter
+	prom              promexporter.PrometheusExporterInterface
 }
 
 func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.Oid,
-	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom *promexporter.PrometheusExporter) (*TableBackup, error) {
+	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom promexporter.PrometheusExporterInterface) (*TableBackup, error) {
 	tableDir := utils.TableDir(tbl, oid)
 
 	tb := TableBackup{
@@ -401,6 +401,7 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	}
 
 	log.Printf("successfully archived %s", destFile)
+
 	return nil
 }
 

@@ -101,7 +101,7 @@ type LogicalBackup struct {
 	typeMsg          []byte
 
 	srv  http.Server
-	prom *prom.PrometheusExporter
+	prom prom.PrometheusExporterInterface
 }
 
 func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
@@ -222,7 +222,6 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 	// therefore, it cannot be written right away when we receive it. Instead, wait for
 	// the actual relation data to arrive and then write it here.
 	// TODO: avoid multiple writes
-
 	if _, ok := b.txBeginRelMsg[tableOID]; !ok {
 		if err := b.WriteCommandDataForTable(bt, msg, cBegin); err != nil {
 			return err
@@ -338,6 +337,7 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 	b.maybeRegisterNewName(m.OID, m.NamespacedName)
 	b.relationMessages[m.OID] = m.Raw
 	// we will write this message later, when we receive the actual DML for this table
+
 	return nil
 }
 
@@ -354,8 +354,8 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 	}
 
 	b.backupTables[m.OID] = tb
-
 	log.Printf("registered new table with oid %d and name %s", m.OID, m.NamespacedName.Sanitize())
+
 	return true, nil
 }
 
@@ -758,7 +758,6 @@ func (b *LogicalBackup) Run() {
 
 	b.waitGr.Add(1)
 	go b.prom.Run(b.ctx, b.waitGr, b.stopCh)
-
 }
 
 func (b *LogicalBackup) flushOidNameMap() error {
@@ -896,6 +895,7 @@ func (lb *LogicalBackup) registerMetrics() error {
 			return fmt.Errorf("could not register prometheus metrics: %v", err)
 		}
 	}
+
 	return nil
 }
 

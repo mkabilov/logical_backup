@@ -442,7 +442,7 @@ func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
 }
 
 func (t *TableBackup) String() string {
-	return t.NamespacedName.String()
+	return t.NamespacedName.Sanitize()
 }
 
 func (t *TableBackup) createDirs() error {
@@ -536,7 +536,7 @@ func (tb *TableBackup) ID() dbutils.Oid {
 }
 
 func (tb *TableBackup) TextID() string {
-	return tb.currentName.UnquotedString()
+	return tb.currentName.String()
 }
 
 func (tb *TableBackup) SetTextID(name message.NamespacedName) {

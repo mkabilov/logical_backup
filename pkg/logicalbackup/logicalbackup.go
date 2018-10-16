@@ -31,7 +31,7 @@ const (
 	applicationName = "logical_backup"
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
-	oidNameMapFile  = "oid2name.map"
+	oidNameMapFile  = "oid2name.yaml"
 
 	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
@@ -355,7 +355,7 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 
 	b.backupTables[m.OID] = tb
 
-	log.Printf("registered new table with oid %d and name %v", m.OID, m.NamespacedName)
+	log.Printf("registered new table with oid %d and name %s", m.OID, m.NamespacedName.Sanitize())
 	return true, nil
 }
 

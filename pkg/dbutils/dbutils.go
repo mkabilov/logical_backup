@@ -2,6 +2,7 @@ package dbutils
 
 import (
 	"database/sql/driver"
+	"fmt"
 
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
@@ -24,6 +25,10 @@ func (l *Lsn) Parse(lsn string) error {
 }
 
 type Oid uint32
+
+func (o Oid) String() string {
+	return fmt.Sprintf("%d", uint32(o))
+}
 
 // implement the Scanner interface in order to allow pgx to read Oid values from the DB.
 func (o *Oid) Scan(src interface{}) error {

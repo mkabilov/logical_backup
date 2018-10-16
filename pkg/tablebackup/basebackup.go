@@ -15,6 +15,7 @@ import (
 
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
+	"github.com/ikitiki/logical_backup/pkg/prometheus"
 	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
@@ -182,6 +183,8 @@ func (t *TableBackup) RunBasebackup() error {
 	t.lastBasebackupTime = time.Now()
 	t.deltasSinceBackupCnt = 0
 
+	t.updateMetricsAfterBaseBackup()
+
 	return nil
 }
 
@@ -195,6 +198,11 @@ func (t *TableBackup) ClearBasebackupPending() {
 
 func (t *TableBackup) IsBasebackupPending() bool {
 	return t.basebackupIsPending
+}
+
+func (t *TableBackup) updateMetricsAfterBaseBackup() {
+	t.prom.Set(promexporter.PerTableLastBackupEndTimestamp, float64(t.lastBasebackupTime.Unix()), []string{t.ID().String(), t.TextID()})
+	t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
 }
 
 // connects to the postgresql instance using replication protocol

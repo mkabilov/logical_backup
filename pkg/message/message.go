@@ -376,7 +376,7 @@ func (t TupleKind) String() string {
 }
 
 func (n NamespacedName) String() string {
-	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
+	return strings.Join([]string{n.Namespace, n.Name}, ".")
 }
 
 func (n NamespacedName) Sanitize() string {

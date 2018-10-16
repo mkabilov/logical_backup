@@ -1,8 +1,13 @@
 package tablebackup
 
 import (
+	"fmt"
+
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
+
+	"github.com/ikitiki/logical_backup/pkg/dbutils"
+	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
 func (t *TableBackup) initPostgresql(conn *pgx.Conn) (*pgtype.ConnInfo, error) {
@@ -94,4 +99,61 @@ func (t *TableBackup) connInfoFromRows(rows *pgx.Rows, err error) (map[string]pg
 	}
 
 	return nameOIDs, err
+}
+
+func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation, error) {
+	var (
+		rel            message.Relation
+		relOid         dbutils.Oid
+		relRepIdentity pgtype.BPChar
+	)
+
+	row := tx.QueryRow(`
+		SELECT c.oid, c.relreplident::char 
+		FROM pg_catalog.pg_class c
+		LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'r'`,
+		tbl.Namespace,
+		tbl.Name)
+
+	if err := row.Scan(&relOid, &relRepIdentity); err != nil {
+		return rel, fmt.Errorf("could not fetch table info: %v", err)
+	}
+
+	rows, err := tx.Query(`
+	SELECT a.attname, a.atttypid, a.atttypmod, format_type(a.atttypid, a.atttypmod)
+	FROM pg_catalog.pg_attribute a  
+	WHERE a.attrelid = $1 AND a.attnum > 0 AND a.attisdropped = false
+	ORDER BY a.attnum`, relOid)
+	if err != nil {
+		return rel, fmt.Errorf("could not exec query: %v", err)
+	}
+	columns := make([]message.Column, 0)
+
+	for rows.Next() {
+		var (
+			name       string
+			attType    uint32
+			typMod     int32
+			formatType string
+		)
+		if err := rows.Scan(&name, &attType, &typMod, &formatType); err != nil {
+			return rel, fmt.Errorf("could not scan row: %v", err)
+		}
+		columns = append(columns, message.Column{
+			IsKey:         false,
+			Name:          name,
+			TypeOID:       dbutils.Oid(attType),
+			Mode:          typMod,
+			FormattedType: formatType,
+		})
+	}
+
+	rel.Namespace = tbl.Namespace
+	rel.Name = tbl.Name
+	rel.Columns = columns
+	rel.ReplicaIdentity = message.ReplicaIdentity(relRepIdentity.String[0])
+	rel.OID = relOid
+
+	return rel, nil
 }

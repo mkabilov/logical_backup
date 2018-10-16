@@ -413,7 +413,7 @@ func (b *LogicalBackup) sendStatus() error {
 	return nil
 }
 
-func (b *LogicalBackup) LogicalDecoding() {
+func (b *LogicalBackup) logicalDecoding() {
 	defer b.waitGr.Done()
 
 	// TODO: move out the initialization routines
@@ -753,7 +753,7 @@ func (b *LogicalBackup) QueueBasebackupTables() {
 
 func (b *LogicalBackup) Run() {
 	b.waitGr.Add(1)
-	go b.LogicalDecoding()
+	go b.logicalDecoding()
 
 	log.Printf("Starting %d background backupers", b.cfg.ConcurrentBasebackups)
 	for i := 0; i < b.cfg.ConcurrentBasebackups; i++ {
@@ -761,22 +761,14 @@ func (b *LogicalBackup) Run() {
 		go b.BackgroundBasebackuper(i)
 	}
 
-	listenAndServeAttempt := func() (bool, error) {
-		if err := b.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("could not start http server %v", err)
-			return true, nil
-		}
-		return false, nil
-	}
-
 	b.waitGr.Add(1)
 	go func() {
 		defer b.waitGr.Done()
-		if err := utils.Retry(listenAndServeAttempt, 3, 3*time.Second, 0); err != nil {
-			log.Printf("http server exited with error %v", err)
-			b.stopCh <- struct{}{}
-			return
+		if err := b.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("could not start http server %v", err)
 		}
+		b.stopCh <- struct{}{}
+		return
 	}()
 
 	// XXX: hack to make sure the http server is aware of the context being closed.
@@ -835,10 +827,7 @@ func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.Names
 }
 
 func (lb *LogicalBackup) registerMetrics() {
-
-	var (
-		err error
-	)
+	var err error
 
 	registerError := func(name string) { log.Printf("could not register %q: %v", name, err) }
 

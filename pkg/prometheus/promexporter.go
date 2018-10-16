@@ -6,9 +6,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
-	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/utils"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -109,7 +107,6 @@ func (pe *PrometheusExporter) RegisterGaugeVector(name, help string, labelNames 
 }
 
 func (pe *PrometheusExporter) Inc(name string, labelValues []string) error {
-
 	switch t := pe.metrics[name].(type) {
 	case prom.Counter:
 		t.Inc()
@@ -127,7 +124,6 @@ func (pe *PrometheusExporter) Inc(name string, labelValues []string) error {
 }
 
 func (pe *PrometheusExporter) Add(name string, addition float64, labelValues []string) error {
-
 	switch t := pe.metrics[name].(type) {
 	case prom.Counter:
 		t.Add(addition)
@@ -141,7 +137,6 @@ func (pe *PrometheusExporter) Add(name string, addition float64, labelValues []s
 }
 
 func (pe *PrometheusExporter) Set(name string, value float64, labelValues []string) error {
-
 	switch t := pe.metrics[name].(type) {
 	case prom.Gauge:
 		t.Set(value)
@@ -189,21 +184,13 @@ func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup, ser
 		}
 	}()
 
-	listenAndServeAttempt := func() (bool, error) {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("prometheus exporter routine closed with error %v", err)
-			return true, nil
-		}
-		return false, nil
-	}
-
 	// TODO: avoid exposting noisy metrics about the prometheus itself
 	http.Handle("/", http.RedirectHandler("/metrics", http.StatusMovedPermanently))
 	http.Handle("/metrics", promhttp.Handler())
 	srv = &http.Server{Addr: fmt.Sprintf(":%d", pe.port)}
 
-	if err := utils.Retry(listenAndServeAttempt, 3, 3*time.Second, 0); err != nil {
-		// tell the main process to bail out
-		serverStopChan <- struct{}{}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("prometheus exporter routine closed with error %v", err)
 	}
+	serverStopChan <- struct{}{}
 }

@@ -302,8 +302,8 @@ func (t *TableBackup) archiver() {
 					log.Printf("could not archive %s: %v", fname, err)
 					continue
 				}
-				t.prom.Inc(promexporter.FilesArchivedCounter, nil)
-				t.prom.Inc(promexporter.PerTablesFilesArchivedCounter, []string{t.ID().String(), t.TextID()})
+
+				t.updateMetricsForArchiver(false)
 			}
 		}
 	}
@@ -332,8 +332,8 @@ func (t *TableBackup) janitor() {
 				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
 				continue
 			}
-			t.prom.Inc(promexporter.FilesArchivedTimeoutCounter, nil)
-			t.prom.Inc(promexporter.PerTableFilesArchivedTimeoutCounter, []string{t.ID().String(), t.TextID()})
+
+			t.updateMetricsForArchiver(true)
 		}
 	}
 }
@@ -402,6 +402,20 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 
 	log.Printf("successfully archived %s", destFile)
 	return nil
+}
+
+func (t *TableBackup) updateMetricsForArchiver(isTimeout bool) {
+	var filesCounter, perTableFilesCounter string
+
+	if isTimeout {
+		filesCounter = promexporter.FilesArchivedTimeoutCounter
+		perTableFilesCounter = promexporter.PerTableFilesArchivedTimeoutCounter
+	} else {
+		filesCounter = promexporter.FilesArchivedCounter
+		perTableFilesCounter = promexporter.PerTablesFilesArchivedCounter
+	}
+	t.prom.Inc(filesCounter, nil)
+	t.prom.Inc(perTableFilesCounter, []string{t.ID().String(), t.TextID()})
 }
 
 func (t *TableBackup) Files() int {

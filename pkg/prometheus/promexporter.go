@@ -77,6 +77,7 @@ func (pe *PrometheusExporter) errorIfExists(name, typeName string) error {
 	if ok {
 		return fmt.Errorf("%s with the name %q is already registered", typeName, name)
 	}
+
 	return nil
 }
 

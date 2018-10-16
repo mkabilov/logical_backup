@@ -252,7 +252,6 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 }
 
 func (b *LogicalBackup) WriteCommandDataForTable(t tablebackup.TableBackuper, msg []byte, cmd cmdType) error {
-	var promType string
 
 	ln, err := t.WriteDelta(msg, b.flushLSN)
 	if err != nil {
@@ -262,32 +261,7 @@ func (b *LogicalBackup) WriteCommandDataForTable(t tablebackup.TableBackuper, ms
 	b.bytesWritten += ln
 	b.msgCnt[cmd]++
 
-	switch cmd {
-	case cInsert:
-		promType = prom.MessageTypeInsert
-	case cUpdate:
-		promType = prom.MessageTypeUpdate
-	case cDelete:
-		promType = prom.MessageTypeDelete
-	case cBegin:
-		promType = prom.MessageTypeBegin
-	case cCommit:
-		promType = prom.MessageTypeCommit
-	case cRelation:
-		promType = prom.MessageTypeRelation
-	case cType:
-		promType = prom.MessageTypeTypeInfo
-	default:
-		promType = prom.MessageTypeUnknown
-	}
-
-	b.prom.Inc(prom.MessageCounter, []string{promType})
-	b.prom.Inc(prom.PerTableMessageCounter, []string{t.ID().String(), t.TextID(), promType})
-	b.prom.SetToCurrentTime(prom.LastWrittenMessageTimestampGauge, nil)
-
-	b.prom.Add(prom.TotalBytesWrittenCounter, float64(ln), nil)
-	b.prom.Add(prom.PerTableBytesCounter, float64(ln), []string{t.ID().String(), t.TextID()})
-	b.prom.Inc(prom.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+	b.updateMetricsAfterWriteDelta(t, cmd, ln)
 
 	return nil
 }
@@ -320,13 +294,11 @@ func (b *LogicalBackup) handler(m message.Message) error {
 		for relOID := range b.txBeginRelMsg {
 			tb := b.backupTables[relOID]
 			if err = b.WriteCommandDataForTable(tb, v.Raw, cCommit); err != nil {
-				break
+				return err
 			}
-			b.prom.Set(prom.PerTableLastCommitTimestampGauge, float64(v.Timestamp.Unix()), []string{tb.ID().String(), tb.TextID()})
 		}
-		b.prom.Inc(prom.TransactionCounter, nil)
-		b.prom.Set(prom.FlushLSNCGauge, float64(b.flushLSN), nil)
-		b.prom.Set(prom.LastCommitTimestampGauge, float64(v.Timestamp.Unix()), nil)
+
+		b.updateMetricsOnCommit(v.Timestamp.Unix())
 
 		// if there were any changes in the table names, flush the map file
 		if err := b.flushOidNameMap(); err != nil {
@@ -927,4 +899,47 @@ func (lb *LogicalBackup) registerMetrics() error {
 		}
 	}
 	return nil
+}
+
+func (b *LogicalBackup) updateMetricsAfterWriteDelta(t tablebackup.TableBackuper, cmd cmdType, ln uint64) {
+	var promType string
+
+	switch cmd {
+	case cInsert:
+		promType = prom.MessageTypeInsert
+	case cUpdate:
+		promType = prom.MessageTypeUpdate
+	case cDelete:
+		promType = prom.MessageTypeDelete
+	case cBegin:
+		promType = prom.MessageTypeBegin
+	case cCommit:
+		promType = prom.MessageTypeCommit
+	case cRelation:
+		promType = prom.MessageTypeRelation
+	case cType:
+		promType = prom.MessageTypeTypeInfo
+	default:
+		promType = prom.MessageTypeUnknown
+	}
+
+	b.prom.Inc(prom.MessageCounter, []string{promType})
+	b.prom.Inc(prom.PerTableMessageCounter, []string{t.ID().String(), t.TextID(), promType})
+	b.prom.SetToCurrentTime(prom.LastWrittenMessageTimestampGauge, nil)
+
+	b.prom.Add(prom.TotalBytesWrittenCounter, float64(ln), nil)
+	b.prom.Add(prom.PerTableBytesCounter, float64(ln), []string{t.ID().String(), t.TextID()})
+	b.prom.Inc(prom.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+}
+
+func (b *LogicalBackup) updateMetricsOnCommit(commitTimestamp int64) {
+
+	for relOID := range b.txBeginRelMsg {
+		tb := b.backupTables[relOID]
+		b.prom.Set(prom.PerTableLastCommitTimestampGauge, float64(commitTimestamp), []string{tb.ID().String(), tb.TextID()})
+	}
+
+	b.prom.Inc(prom.TransactionCounter, nil)
+	b.prom.Set(prom.FlushLSNCGauge, float64(b.flushLSN), nil)
+	b.prom.Set(prom.LastCommitTimestampGauge, float64(commitTimestamp), nil)
 }

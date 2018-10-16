@@ -33,22 +33,22 @@ func (t *TableBackup) RunBasebackup() error {
 	}()
 
 	log.Printf("Starting base backup of %s", t)
-	tempFilepath := path.Join(t.tempDir, t.infoFilename+".new")
-	if _, err := os.Stat(tempFilepath); !os.IsNotExist(err) {
+	tempInfoFilepath := path.Join(t.tempDir, t.infoFilename+".new")
+	if _, err := os.Stat(tempInfoFilepath); !os.IsNotExist(err) {
 		if err != nil {
-			return fmt.Errorf("could not stat %q: %v", tempFilepath, err)
+			return fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
 		}
-		os.Remove(tempFilepath)
+		os.Remove(tempInfoFilepath)
 	}
 
-	infoFp, err := os.OpenFile(tempFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	infoFp, err := os.OpenFile(tempInfoFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("could not create info file: %v", err)
 	}
 
 	defer func() {
 		infoFp.Close()
-		os.Remove(tempFilepath)
+		os.Remove(tempInfoFilepath)
 	}()
 
 	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= t.sleepBetweenBackups {
@@ -100,17 +100,17 @@ func (t *TableBackup) RunBasebackup() error {
 			return true, fmt.Errorf("could not lock table: %v", err)
 		}
 
+		relationInfo, err = FetchRelationInfo(t.tx, t.NamespacedName)
+		if err != nil {
+			return true, fmt.Errorf("could not fetch table struct: %v", err)
+		}
+
 		//TODO: check if table is empty before creating logical replication slot
 		if hasRows, err := t.hasRows(); err != nil {
 			return true, fmt.Errorf("could not check if table has rows: %v", err)
 		} else if !hasRows {
 			log.Printf("table %s seems to have no rows; skipping", t.NamespacedName)
-			return true, nil
-		}
-
-		relationInfo, err = FetchRelationInfo(t.tx, t.NamespacedName)
-		if err != nil {
-			return true, fmt.Errorf("could not fetch table struct: %v", err)
+			return false, nil
 		}
 
 		if err := t.copyDump(); err != nil {
@@ -134,7 +134,7 @@ func (t *TableBackup) RunBasebackup() error {
 		return fmt.Errorf("could not save info file: %v", err)
 	}
 
-	if err := os.Rename(tempFilepath, path.Join(t.tempDir, t.infoFilename)); err != nil {
+	if err := os.Rename(tempInfoFilepath, path.Join(t.tempDir, t.infoFilename)); err != nil {
 		log.Printf("could not rename: %v", err)
 	}
 

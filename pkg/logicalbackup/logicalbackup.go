@@ -223,7 +223,7 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 	// the actual relation data to arrive and then write it here.
 	// TODO: avoid multiple writes
 	if _, ok := b.txBeginRelMsg[tableOID]; !ok {
-		if err := b.WriteCommandDataForTable(bt, msg, cBegin); err != nil {
+		if err := b.WriteCommandDataForTable(bt, b.beginMsg, cBegin); err != nil {
 			return err
 		}
 		b.txBeginRelMsg[bt.ID()] = struct{}{}
@@ -236,8 +236,8 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 		b.typeMsg = nil
 	}
 
-	if msg, ok := b.relationMessages[tableOID]; ok {
-		if err := b.WriteCommandDataForTable(bt, msg, cRelation); err != nil {
+	if relationMsg, ok := b.relationMessages[tableOID]; ok {
+		if err := b.WriteCommandDataForTable(bt, relationMsg, cRelation); err != nil {
 			return fmt.Errorf("could not write a relation message: %v", err)
 		}
 		delete(b.relationMessages, tableOID)

@@ -204,16 +204,11 @@ func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup, ser
 	wait.Add(1)
 	go func() {
 		defer wait.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				if err := srv.Close(); err != nil {
-					log.Printf("error while closing prometheus connections: %v", err)
-				}
-				log.Printf("prometheus connection closed")
-				return
-			}
+		<-ctx.Done()
+		if err := srv.Close(); err != nil {
+			log.Printf("error while closing prometheus connections: %v", err)
 		}
+		log.Printf("prometheus connection closed")
 	}()
 
 	// TODO: avoid exposting noisy metrics about the prometheus itself

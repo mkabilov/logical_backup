@@ -749,13 +749,11 @@ func (b *LogicalBackup) Run() {
 	b.waitGr.Add(1)
 	go func() {
 		defer b.waitGr.Done()
-		select {
-		case <-b.ctx.Done():
-			if err := b.srv.Close(); err != nil {
-				log.Printf("could not close http server: %v", err)
-			}
-			log.Printf("debug http server closed")
+		<-b.ctx.Done()
+		if err := b.srv.Close(); err != nil {
+			log.Printf("could not close http server: %v", err)
 		}
+		log.Printf("debug http server closed")
 	}()
 
 	b.waitGr.Add(1)

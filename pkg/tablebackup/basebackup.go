@@ -186,8 +186,8 @@ func (t *TableBackup) RunBasebackup() error {
 			continue
 		}
 
-		if err := t.PurgeObsoleteDeltaFiles(path.Join(baseDir, deltasDirName)); err != nil {
-			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(baseDir, deltasDirName), err)
+		if err := t.PurgeObsoleteDeltaFiles(path.Join(baseDir, DeltasDirName)); err != nil {
+			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(baseDir, DeltasDirName), err)
 		}
 	}
 

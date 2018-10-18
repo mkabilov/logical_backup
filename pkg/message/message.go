@@ -386,3 +386,18 @@ func (n NamespacedName) String() string {
 func (n NamespacedName) Sanitize() string {
 	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
 }
+
+func (r Relation) Structure() string {
+	result := fmt.Sprintf("%s.%s (OID: %v)", r.Namespace, r.Name, r.OID)
+
+	cols := make([]string, 0)
+	for _, c := range r.Columns {
+		cols = append(cols, fmt.Sprintf("%s(%s)", c.Name, c.FormattedType))
+	}
+
+	if len(cols) > 0 {
+		result += fmt.Sprintf(" Columns: %s", strings.Join(cols, ", "))
+	}
+
+	return result
+}

@@ -10,14 +10,9 @@ import (
 	"time"
 
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
-func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
-	if oid == dbutils.InvalidOid {
-		panic(fmt.Sprintf("requested table directories for the table %s with invalid oid", tbl))
-	}
-
+func TableDir(oid dbutils.Oid) string {
 	tblOidBytes := fmt.Sprintf("%08x", uint32(oid))
 
 	return path.Join(tblOidBytes[6:8], tblOidBytes[4:6], tblOidBytes[2:4], fmt.Sprintf("%d", oid))

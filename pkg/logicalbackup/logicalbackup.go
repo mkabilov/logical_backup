@@ -31,7 +31,7 @@ const (
 	applicationName = "logical_backup"
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
-	oidNameMapFile  = "oid2name.yaml"
+	OidNameMapFile  = "oid2name.yaml"
 	stateFile       = "state.yaml"
 
 	statusTimeout = time.Second * 10
@@ -46,14 +46,14 @@ const (
 	cType
 )
 
-type nameAtLsn struct {
+type NameAtLsn struct {
 	Name message.NamespacedName
 	Lsn  dbutils.Lsn
 }
 
 type oidToName struct {
 	isChanged         bool
-	nameChangeHistory map[dbutils.Oid][]nameAtLsn
+	nameChangeHistory map[dbutils.Oid][]NameAtLsn
 }
 
 type StateInfo struct {
@@ -131,7 +131,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		statusTimeout:          statusTimeout,
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
 		relationMessages:       make(map[dbutils.Oid][]byte),
-		tableNameChanges:       oidToName{nameChangeHistory: make(map[dbutils.Oid][]nameAtLsn)},
+		tableNameChanges:       oidToName{nameChangeHistory: make(map[dbutils.Oid][]NameAtLsn)},
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
@@ -794,7 +794,7 @@ func (b *LogicalBackup) flushOidNameMap() error {
 		return nil
 	}
 
-	fp, err := os.OpenFile(path.Join(b.baseDir(), oidNameMapFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	fp, err := os.OpenFile(path.Join(b.baseDir(), OidNameMapFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return err
 	}
@@ -813,14 +813,14 @@ func (b *LogicalBackup) flushOidNameMap() error {
 }
 
 func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.NamespacedName) {
-	var lastEntry nameAtLsn
+	var lastEntry NameAtLsn
 
 	if b.tableNameChanges.nameChangeHistory[oid] != nil {
 		lastEntry = b.tableNameChanges.nameChangeHistory[oid][len(b.tableNameChanges.nameChangeHistory[oid])-1]
 	}
 	if b.tableNameChanges.nameChangeHistory[oid] == nil || lastEntry.Name != name {
 		b.tableNameChanges.nameChangeHistory[oid] = append(b.tableNameChanges.nameChangeHistory[oid],
-			nameAtLsn{Name: name, Lsn: b.flushLSN})
+			NameAtLsn{Name: name, Lsn: b.flushLSN})
 		b.tableNameChanges.isChanged = true
 
 		// inform the tableBackuper about the new name

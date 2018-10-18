@@ -31,7 +31,7 @@ func main() {
 	if cfg.StagingDir != "" {
 		log.Printf("Staging directory: %q", cfg.StagingDir)
 	} else {
-		log.Printf("No staging directory. Writing directly to archive dir")
+		log.Printf("No staging directory. Writing directly to the archive dir")
 	}
 	log.Printf("Archive directory: %q", cfg.ArchiveDir)
 	log.Printf("BackupThreshold: %v", cfg.BackupThreshold)

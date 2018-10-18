@@ -25,7 +25,7 @@ import (
 
 const (
 	// TODO: move those constants somewhere else
-	deltasDirName      = "deltas"
+	DeltasDirName      = "deltas"
 	BasebackupFilename = "basebackup.copy"
 	TableInfoFilename  = "info.yaml"
 
@@ -107,7 +107,7 @@ type TableBackup struct {
 
 func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.Oid,
 	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom promexporter.PrometheusExporterInterface) (*TableBackup, error) {
-	tableDir := utils.TableDir(tbl, oid)
+	tableDir := utils.TableDir(oid)
 
 	tb := TableBackup{
 		NamespacedName:      tbl,
@@ -205,7 +205,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 		baseDir = t.archiveDir
 	}
 
-	deltaFilepath := path.Join(baseDir, deltasDirName, t.segmentFilename)
+	deltaFilepath := path.Join(baseDir, DeltasDirName, t.segmentFilename)
 
 	fp, err := os.OpenFile(deltaFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
@@ -224,7 +224,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 		}
 	}
 	log.Printf("flushed current segment to disk file %s", deltaFilepath)
-	t.queueArchiveFile(path.Join(deltasDirName, t.segmentFilename))
+	t.queueArchiveFile(path.Join(DeltasDirName, t.segmentFilename))
 
 	return err
 }
@@ -472,7 +472,7 @@ func (t *TableBackup) String() string {
 
 func (t *TableBackup) createDirs() error {
 	if t.stagingDir != "" {
-		stagingDeltasPath := path.Join(t.stagingDir, deltasDirName)
+		stagingDeltasPath := path.Join(t.stagingDir, DeltasDirName)
 		if _, err := os.Stat(stagingDeltasPath); os.IsNotExist(err) {
 			if err := os.MkdirAll(stagingDeltasPath, dirPerms); err != nil {
 				return fmt.Errorf("could not create staging delta dir: %v", err)
@@ -480,7 +480,7 @@ func (t *TableBackup) createDirs() error {
 		}
 	}
 
-	archiveDeltasPath := path.Join(t.archiveDir, deltasDirName)
+	archiveDeltasPath := path.Join(t.archiveDir, DeltasDirName)
 	if _, err := os.Stat(archiveDeltasPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(archiveDeltasPath, dirPerms); err != nil {
 			return fmt.Errorf("could not create archive delta dir: %v", err)
@@ -504,7 +504,7 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 		return false, name
 	}
 	dir, file := path.Split(name)
-	if dir == deltasDirName {
+	if dir == DeltasDirName {
 		return true, file
 	}
 

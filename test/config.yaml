@@ -1,0 +1,18 @@
+deltasPerFile: 10000
+backupThreshold: 100
+concurrentBasebackups: 5
+trackNewTables: true
+slotname: testslot
+publication: mypub
+sendStatusOnCommit: false
+initialBasebackup: true
+fsync: true
+archiveDir: /tmp/final
+forceBasebackupAfterInactivityInterval: 24h
+archiverTimeout: 3h
+prometheusPort: 19999
+db:
+  host: 127.0.0.1
+  port: 5432
+  database: lb_test1
+  user: postgres

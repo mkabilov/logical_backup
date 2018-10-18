@@ -10,7 +10,6 @@ import (
 )
 
 type Config struct {
-	TempDir                                string         `yaml:"tempDir"`
 	DB                                     pgx.ConnConfig `yaml:"db"`
 	Slotname                               string         `yaml:"slotname"`
 	PublicationName                        string         `yaml:"publication"`
@@ -21,6 +20,7 @@ type Config struct {
 	InitialBasebackup                      bool           `yaml:"initialBasebackup"`
 	SendStatusOnCommit                     bool           `yaml:"sendStatusOnCommit"`
 	Fsync                                  bool           `yaml:"fsync"`
+	StagingDir                             string         `yaml:"StagingDir"`
 	ArchiveDir                             string         `yaml:"archiveDir"`
 	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
 	ArchiverTimeout                        time.Duration  `yaml:"archiverTimeout"`

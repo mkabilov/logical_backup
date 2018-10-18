@@ -33,10 +33,10 @@ type ReplicaIdentity uint8
 type TupleKind uint8
 
 type DumpInfo struct {
-	StartLSN       string    `json:"LSN"`
-	CreateDate     time.Time `json:"CreateDate"`
-	Relation       Relation  `json:"Relation"`
-	BackupDuration float64   `json:"BackupDuration"`
+	StartLSN       string    `yaml:"StartLSN"`
+	CreateDate     time.Time `yaml:"CreateDate"`
+	Relation       Relation  `yaml:"Relation"`
+	BackupDuration float64   `yaml:"BackupDuration"`
 }
 
 type Message interface {
@@ -67,16 +67,16 @@ type DMLMessage struct {
 }
 
 type NamespacedName struct {
-	Namespace string
-	Name      string
+	Namespace string `yaml:"Namespace"`
+	Name      string `yaml:"Name"`
 }
 
 type Column struct {
-	IsKey         bool        // column as part of the key.
-	Name          string      // Name of the column.
-	TypeOID       dbutils.Oid // OID of the column's data type.
-	Mode          int32       // TypeOID modifier of the column (atttypmod).
-	FormattedType string
+	IsKey         bool        `yaml:"IsKey"`         // column as part of the key.
+	Name          string      `yaml:"Name"`          // Name of the column.
+	TypeOID       dbutils.Oid `yaml:"TypeOID"`       // OID of the column's data type.
+	Mode          int32       `yaml:"Mode"`          // TypeOID modifier of the column (atttypmod).
+	FormattedType string      `yaml:"FormattedType"` //
 }
 
 type Tuple struct {
@@ -106,12 +106,12 @@ type Origin struct {
 }
 
 type Relation struct {
-	NamespacedName
+	NamespacedName `yaml:"NamespacedName"`
 
-	Raw             []byte
-	OID             dbutils.Oid     // OID of the relation.
-	ReplicaIdentity ReplicaIdentity // Replica identity
-	Columns         []Column        // Columns
+	Raw             []byte          `yaml:"-"`
+	OID             dbutils.Oid     `yaml:"OID"`             // OID of the relation.
+	ReplicaIdentity ReplicaIdentity `yaml:"ReplicaIdentity"` // Replica identity
+	Columns         []Column        `yaml:"Columns"`         // Columns
 }
 
 type Insert struct {
@@ -346,20 +346,24 @@ func (r ReplicaIdentity) String() string {
 	}
 }
 
-func (r ReplicaIdentity) MarshalJSON() ([]byte, error) {
-	return []byte(fmt.Sprintf(`"%s"`, r)), nil
+func (r ReplicaIdentity) MarshalYAML() (interface{}, error) {
+	return replicaIdentities[r], nil
 }
 
-func (r *ReplicaIdentity) UnmarshalJSON(b []byte) error {
-	val := string(b)
+func (r *ReplicaIdentity) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var val string
+	if err := unmarshal(&val); err != nil {
+		return err
+	}
+
 	for k, v := range replicaIdentities {
-		if val == fmt.Sprintf(`"%v"`, v) {
+		if val == v {
 			*r = k
 			return nil
 		}
 	}
 
-	return fmt.Errorf("unknown replica identity")
+	return fmt.Errorf("unknown replica identity: %q", val)
 }
 
 func (t TupleKind) String() string {

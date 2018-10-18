@@ -32,6 +32,7 @@ const (
 	outputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
 	oidNameMapFile  = "oid2name.yaml"
+	stateFile       = "state.yaml"
 
 	statusTimeout = time.Second * 10
 	waitTimeout   = time.Second * 10
@@ -66,9 +67,8 @@ type LogicalBackuper interface {
 }
 
 type LogicalBackup struct {
-	ctx           context.Context
-	stateFilename string
-	cfg           *config.Config
+	ctx context.Context
+	cfg *config.Config
 
 	pluginArgs []string
 
@@ -123,9 +123,10 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
 	lb := &LogicalBackup{
-		ctx:                    ctx,
-		stopCh:                 stopCh,
-		dbCfg:                  pgxConn,
+		ctx:    ctx,
+		stopCh: stopCh,
+		dbCfg:  pgxConn,
+
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
 		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
@@ -134,7 +135,6 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
 		basebackupQueue:        queue.New(ctx),
 		waitGr:                 &sync.WaitGroup{},
-		stateFilename:          "state.yaml", //TODO: move to the config file
 		cfg:                    cfg,
 		msgCnt:                 make(map[cmdType]int),
 		srv: http.Server{
@@ -144,10 +144,22 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		prom: prom.New(cfg.PrometheusPort),
 	}
 
-	if _, err := os.Stat(cfg.TempDir); os.IsNotExist(err) {
-		if err := os.Mkdir(cfg.TempDir, os.ModePerm); err != nil {
-			return nil, fmt.Errorf("could not create base dir: %v", err)
+	if cfg.StagingDir != "" {
+		if _, err := os.Stat(cfg.StagingDir); os.IsNotExist(err) {
+			if err := os.Mkdir(cfg.StagingDir, os.ModePerm); err != nil {
+				return nil, fmt.Errorf("could not create staging dir: %v", err)
+			}
+		} else if err != nil {
+			return nil, fmt.Errorf("%q stat error: %v", cfg.StagingDir, err)
 		}
+	}
+
+	if _, err := os.Stat(cfg.ArchiveDir); os.IsNotExist(err) {
+		if err := os.Mkdir(cfg.ArchiveDir, os.ModePerm); err != nil {
+			return nil, fmt.Errorf("could not create archive dir: %v", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("%q stat error: %v", cfg.ArchiveDir, err)
 	}
 
 	conn, err := pgx.Connect(pgxConn)
@@ -209,6 +221,14 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	}
 
 	return lb, nil
+}
+
+func (b *LogicalBackup) baseDir() string {
+	if b.cfg.StagingDir != "" {
+		return b.cfg.StagingDir
+	} else {
+		return b.cfg.ArchiveDir
+	}
 }
 
 func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg []byte) error {
@@ -600,14 +620,12 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	}
 
 	for _, t := range tables {
-		var targetReplicaIdentity message.ReplicaIdentity
+		targetReplicaIdentity := t.replicaIdentity
 
 		if t.hasPK {
 			targetReplicaIdentity = message.ReplicaIdentityDefault
 		} else if t.replicaIdentity != message.ReplicaIdentityIndex {
 			targetReplicaIdentity = message.ReplicaIdentityFull
-		} else {
-			targetReplicaIdentity = t.replicaIdentity
 		}
 
 		if targetReplicaIdentity != t.replicaIdentity {
@@ -632,7 +650,9 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 
 	}
 	// flush the OID to name mapping
-	b.flushOidNameMap()
+	if err := b.flushOidNameMap(); err != nil {
+		log.Printf("could not flush oid name map: %v", err)
+	}
 
 	return nil
 }
@@ -640,7 +660,8 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 func (b *LogicalBackup) readRestartLSN() (dbutils.Lsn, error) {
 	var stateInfo StateInfo
 
-	stateFilename := path.Join(b.cfg.TempDir, b.stateFilename)
+	stateFilename := path.Join(b.baseDir(), stateFile)
+
 	if _, err := os.Stat(stateFilename); os.IsNotExist(err) {
 		return 0, nil
 	}
@@ -664,34 +685,40 @@ func (b *LogicalBackup) readRestartLSN() (dbutils.Lsn, error) {
 }
 
 func (b *LogicalBackup) storeRestartLSN() error {
-	//TODO: I'm ugly, refactor me >_<
-
-	fp, err := os.OpenFile(path.Join(b.cfg.TempDir, b.stateFilename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("could not create current lsn file: %v", err)
-	}
-	defer fp.Close()
-
-	fpArchive, err := os.OpenFile(path.Join(b.cfg.ArchiveDir, b.stateFilename), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("could not create archive lsn file: %v", err)
-	}
-	defer fpArchive.Close()
-
 	stateInfo := StateInfo{
 		Timestamp:  time.Now(),
 		CurrentLSN: b.flushLSN.String(),
 	}
 
-	if err := yaml.NewEncoder(fp).Encode(stateInfo); err != nil {
-		return fmt.Errorf("could not save current lsn: %v", err)
+	if b.cfg.StagingDir != "" {
+		fp, err := os.OpenFile(path.Join(b.cfg.StagingDir, stateFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+		if err != nil {
+			return fmt.Errorf("could not create current lsn file: %v", err)
+		}
+		defer fp.Close()
+
+		if err := yaml.NewEncoder(fp).Encode(stateInfo); err != nil {
+			return fmt.Errorf("could not save current lsn: %v", err)
+		}
+
+		if err := utils.SyncFileAndDirectory(fp); err != nil {
+			log.Printf("could not sync file and dir: %v", err)
+		}
 	}
-	fp.Sync() //TODO: fsync dir as well
+
+	fpArchive, err := os.OpenFile(path.Join(b.cfg.ArchiveDir, stateFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not create archive lsn file: %v", err)
+	}
+	defer fpArchive.Close()
 
 	if err := yaml.NewEncoder(fpArchive).Encode(stateInfo); err != nil {
 		return fmt.Errorf("could not save current lsn: %v", err)
 	}
-	fpArchive.Sync() //TODO: fsync dir as well
+
+	if err := utils.SyncFileAndDirectory(fpArchive); err != nil {
+		log.Printf("could not sync file and dir: %v", err)
+	}
 
 	return nil
 }
@@ -749,10 +776,12 @@ func (b *LogicalBackup) Run() {
 	b.waitGr.Add(1)
 	go func() {
 		defer b.waitGr.Done()
+
 		<-b.ctx.Done()
 		if err := b.srv.Close(); err != nil {
 			log.Printf("could not close http server: %v", err)
 		}
+
 		log.Printf("debug http server closed")
 	}()
 
@@ -764,18 +793,20 @@ func (b *LogicalBackup) flushOidNameMap() error {
 	if !b.tableNameChanges.isChanged {
 		return nil
 	}
-	mapFilePath := path.Join(b.cfg.ArchiveDir, oidNameMapFile)
-	fp, err := os.OpenFile(mapFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	defer fp.Close()
+
+	fp, err := os.OpenFile(path.Join(b.baseDir(), oidNameMapFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		return err
 	}
+	defer fp.Close()
+
 	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.nameChangeHistory)
 	if err == nil {
 		b.tableNameChanges.isChanged = false
 	}
-	if err := utils.SyncFileAndDirectory(fp, mapFilePath, b.cfg.ArchiveDir); err != nil {
-		return fmt.Errorf("could not sync oid to name map file %q: %v", mapFilePath, err)
+
+	if err := utils.SyncFileAndDirectory(fp); err != nil {
+		return fmt.Errorf("could not sync oid to name map file: %v", err)
 	}
 
 	return err

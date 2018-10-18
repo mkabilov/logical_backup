@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ func TableDir(tbl message.NamespacedName, oid dbutils.Oid) string {
 		panic(fmt.Sprintf("requested table directories for the table %s with invalid oid", tbl))
 	}
 
-	tblOidBytes := fmt.Sprintf("%08x", oid)
+	tblOidBytes := fmt.Sprintf("%08x", uint32(oid))
 
 	return path.Join(tblOidBytes[6:8], tblOidBytes[4:6], tblOidBytes[2:4], fmt.Sprintf("%d", oid))
 }
@@ -78,20 +79,22 @@ func GetLSNFromDeltaFilename(filename string) (dbutils.Lsn, error) {
 	return dbutils.Lsn(lsn), err
 }
 
-func SyncFileAndDirectory(fp *os.File, path, parentDirectoryName string) error {
+func SyncFileAndDirectory(fp *os.File) error {
 	if err := fp.Sync(); err != nil {
-		return fmt.Errorf("could not sync file %s: %v", path, err)
+		return fmt.Errorf("could not sync file %s: %v", fp.Name(), err)
 	}
 
+	parentDir := filepath.Dir(fp.Name())
+
 	// sync the directory entry
-	dp, err := os.Open(parentDirectoryName)
+	dp, err := os.Open(parentDir)
 	if err != nil {
-		return fmt.Errorf("could not open directory %s to sync: %v", parentDirectoryName, err)
+		return fmt.Errorf("could not open directory %s to sync: %v", parentDir, err)
 	}
 	defer dp.Close()
 
-	if err = dp.Sync(); err != nil {
-		return fmt.Errorf("could not sync directory %s: %v", err)
+	if err := dp.Sync(); err != nil {
+		return fmt.Errorf("could not sync directory %s: %v", parentDir, err)
 	}
 
 	return nil

@@ -20,24 +20,31 @@ import (
 )
 
 func (t *TableBackup) RunBasebackup() error {
+	//TODO: split me into several methods
 	var (
 		backupLSN, preBackupLSN, postBackupLSN dbutils.Lsn
+		tableInfoDir                           string
 	)
 
 	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
 		log.Printf("Already locked %s; skipping", t)
 		return nil
 	}
-	defer func() {
-		atomic.StoreUint32(&t.locker, 0)
-	}()
-
+	defer atomic.StoreUint32(&t.locker, 0)
 	log.Printf("Starting base backup of %s", t)
-	tempInfoFilepath := path.Join(t.tempDir, t.infoFilename+".new")
+
+	if t.stagingDir != "" {
+		tableInfoDir = t.stagingDir
+	} else {
+		tableInfoDir = t.archiveDir
+	}
+
+	tempInfoFilepath := path.Join(tableInfoDir, TableInfoFilename+".new")
 	if _, err := os.Stat(tempInfoFilepath); !os.IsNotExist(err) {
 		if err != nil {
 			return fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
 		}
+
 		os.Remove(tempInfoFilepath)
 	}
 
@@ -134,7 +141,7 @@ func (t *TableBackup) RunBasebackup() error {
 		return fmt.Errorf("could not save info file: %v", err)
 	}
 
-	if err := os.Rename(tempInfoFilepath, path.Join(t.tempDir, t.infoFilename)); err != nil {
+	if err := os.Rename(tempInfoFilepath, path.Join(tableInfoDir, TableInfoFilename)); err != nil {
 		log.Printf("could not rename: %v", err)
 	}
 
@@ -150,7 +157,7 @@ func (t *TableBackup) RunBasebackup() error {
 	if candidateLSN > backupLSN {
 		log.Printf("first delta lsn to keep %s is higher than the backup lsn %s, attempting the previous delta lsn %s",
 			postBackupLSN, backupLSN, preBackupLSN)
-		// lookd like the slot that has been created after the delta segment got an LSN that is lower than that segment!
+		// looks like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
 			log.Panic("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
 				t, backupLSN, t.firstDeltaLSNToKeep)
@@ -165,7 +172,7 @@ func (t *TableBackup) RunBasebackup() error {
 	}
 
 	t.firstDeltaLSNToKeep = candidateLSN
-	t.archiveFilesQueue.Put(t.infoFilename)
+	t.queueArchiveFile(TableInfoFilename)
 
 	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
 		t.String(),
@@ -173,10 +180,14 @@ func (t *TableBackup) RunBasebackup() error {
 		backupLSN,
 		t.firstDeltaLSNToKeep)
 
-	// not that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
-	for _, basedir := range []string{t.tempDir, t.finalDir} {
-		if err := t.PurgeObsoleteDeltaFiles(path.Join(basedir, deltasDirName)); err != nil {
-			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(basedir, deltasDirName), err)
+	// note that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
+	for _, baseDir := range []string{t.stagingDir, t.archiveDir} {
+		if baseDir == "" {
+			continue
+		}
+
+		if err := t.PurgeObsoleteDeltaFiles(path.Join(baseDir, deltasDirName)); err != nil {
+			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(baseDir, deltasDirName), err)
 		}
 	}
 
@@ -201,8 +212,17 @@ func (t *TableBackup) IsBasebackupPending() bool {
 }
 
 func (t *TableBackup) updateMetricsAfterBaseBackup() {
-	t.prom.Set(promexporter.PerTableLastBackupEndTimestamp, float64(t.lastBasebackupTime.Unix()), []string{t.ID().String(), t.TextID()})
-	t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+	err := t.prom.Set(
+		promexporter.PerTableLastBackupEndTimestamp,
+		float64(t.lastBasebackupTime.Unix()), []string{t.ID().String(), t.TextID()})
+	if err != nil {
+		log.Printf("could not set %s: %v", promexporter.PerTableLastBackupEndTimestamp, err)
+	}
+
+	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+	if err != nil {
+		log.Printf("could not reset %s: %v", promexporter.PerTableMessageSinceLastBackupGauge, err)
+	}
 }
 
 // connects to the postgresql instance using replication protocol
@@ -326,11 +346,19 @@ func (t *TableBackup) txRollback() error {
 }
 
 func (t *TableBackup) copyDump() error {
+	var dumpDir string
+
 	if t.tx == nil {
 		return fmt.Errorf("no running transaction")
 	}
 
-	tempFilename := path.Join(t.tempDir, t.basebackupFilename+".new")
+	if t.cfg.StagingDir != "" {
+		dumpDir = t.stagingDir
+	} else {
+		dumpDir = t.archiveDir
+	}
+
+	tempFilename := path.Join(dumpDir, BasebackupFilename+".new")
 	if _, err := os.Stat(tempFilename); !os.IsNotExist(err) {
 		if err != nil {
 			return fmt.Errorf("could not stat %q: %v", tempFilename, err)
@@ -349,13 +377,14 @@ func (t *TableBackup) copyDump() error {
 			os.Remove(tempFilename)
 			return fmt.Errorf("could not copy and rollback tx: %v, %v", err2, err)
 		}
+
 		os.Remove(tempFilename)
 		return fmt.Errorf("could not copy: %v", err)
 	}
-	if err := os.Rename(tempFilename, path.Join(t.tempDir, t.basebackupFilename)); err != nil {
+	if err := os.Rename(tempFilename, path.Join(dumpDir, BasebackupFilename)); err != nil {
 		return fmt.Errorf("could not move file: %v", err)
 	}
-	t.archiveFilesQueue.Put(t.basebackupFilename)
+	t.queueArchiveFile(BasebackupFilename)
 
 	return nil
 }

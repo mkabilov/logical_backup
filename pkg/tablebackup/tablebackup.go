@@ -24,10 +24,12 @@ import (
 )
 
 const (
+	// TODO: move those constants somewhere else
+	deltasDirName      = "deltas"
+	BasebackupFilename = "basebackup.copy"
+	TableInfoFilename  = "info.yaml"
+
 	dirPerms                 = os.ModePerm
-	deltasDirName            = "deltas"
-	basebackupFilename       = "basebackup.copy"
-	tableInfoFilename        = "info.yaml"
 	maxArchiverRetryTimeout  = 5 * time.Second
 	maxArchiverRetryAttempts = 3
 	archiverWorkerNapTime    = 500 * time.Millisecond
@@ -39,7 +41,6 @@ type TableBackuper interface {
 
 	WriteDelta([]byte, dbutils.Lsn) (uint64, error)
 	Files() int
-	Truncate() error
 	String() string
 	ID() dbutils.Oid
 	TextID() string
@@ -70,10 +71,8 @@ type TableBackup struct {
 	dbCfg pgx.ConnConfig
 
 	// Files
-	tempDir            string
-	finalDir           string
-	basebackupFilename string
-	infoFilename       string
+	stagingDir string
+	archiveDir string
 
 	// Deltas
 	// TODO: should we get rid of those altogether in favor of Prometheus?
@@ -118,14 +117,14 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 		sleepBetweenBackups: time.Second * 3,
 		cfg:                 cfg,
 		dbCfg:               dbCfg,
-		tempDir:             path.Join(cfg.TempDir, tableDir),
-		finalDir:            path.Join(cfg.ArchiveDir, tableDir),
-		basebackupFilename:  basebackupFilename,
-		infoFilename:        tableInfoFilename,
+		archiveDir:          path.Join(cfg.ArchiveDir, tableDir),
 		msgLen:              make([]byte, 8),
 		archiveFilesQueue:   queue.New(ctx),
 		segmentBufferMutex:  &sync.Mutex{},
 		prom:                prom,
+	}
+	if cfg.StagingDir != "" {
+		tb.stagingDir = path.Join(cfg.StagingDir, tableDir)
 	}
 
 	if err := tb.createDirs(); err != nil {
@@ -134,13 +133,22 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 
 	tb.basebackupQueue = basebackupsQueue
 
-	tb.wait.Add(3)
-
+	tb.wait.Add(2)
 	go tb.janitor()
-	go tb.archiver()
 	go tb.periodicBackup()
 
+	if cfg.StagingDir != "" {
+		tb.wait.Add(1)
+		go tb.archiver()
+	}
+
 	return &tb, nil
+}
+
+func (t *TableBackup) queueArchiveFile(filename string) {
+	if t.cfg.StagingDir != "" {
+		t.archiveFilesQueue.Put(filename)
+	}
 }
 
 func (t *TableBackup) WriteDelta(msg []byte, lsn dbutils.Lsn) (uint64, error) {
@@ -176,6 +184,7 @@ func (t *TableBackup) WriteDelta(msg []byte, lsn dbutils.Lsn) (uint64, error) {
 
 func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
 	var err error
+
 	if _, err = t.segmentBuffer.Write(currentDelta); err != nil {
 		return fmt.Errorf("could not write current delta: %v", err)
 	}
@@ -188,31 +197,41 @@ func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
 }
 
 func (t *TableBackup) writeSegmentToFile() error {
-	deltaPath := path.Join(t.tempDir, t.segmentFilename)
-	fp, err := os.OpenFile(deltaPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	var baseDir string
+
+	if t.stagingDir != "" {
+		baseDir = t.stagingDir
+	} else {
+		baseDir = t.archiveDir
+	}
+
+	deltaFilepath := path.Join(baseDir, deltasDirName, t.segmentFilename)
+
+	fp, err := os.OpenFile(deltaFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaPath, err)
+		return fmt.Errorf("could not open file %s to write delta segment: %v", deltaFilepath, err)
 	}
 	defer fp.Close()
 
 	if _, err = t.segmentBuffer.WriteTo(fp); err != nil {
-		return fmt.Errorf("could not write delta segment to a file %s: %v", deltaPath, err)
+		return fmt.Errorf("could not write delta segment to a file %s: %v", deltaFilepath, err)
 	}
 
 	if t.cfg.Fsync {
 		// sync the file data itself
-		if err := utils.SyncFileAndDirectory(fp, deltaPath, t.tempDir); err != nil {
+		if err := utils.SyncFileAndDirectory(fp); err != nil {
 			return err
 		}
 	}
-	log.Printf("flushed current segment to disk file %s", deltaPath)
-	t.archiveFilesQueue.Put(t.segmentFilename)
+	log.Printf("flushed current segment to disk file %s", deltaFilepath)
+	t.queueArchiveFile(path.Join(deltasDirName, t.segmentFilename))
 
 	return err
 }
 
 func (t *TableBackup) startNewSegment(startLSN dbutils.Lsn) {
 	t.segmentBuffer.Reset()
+
 	if startLSN != 0 {
 		t.setSegmentFilename(startLSN)
 
@@ -221,6 +240,7 @@ func (t *TableBackup) startNewSegment(startLSN dbutils.Lsn) {
 	} else {
 		t.segmentFilename = ""
 	}
+
 	t.deltaCnt = 0
 }
 
@@ -276,10 +296,12 @@ func (t *TableBackup) archiver() {
 					// the only other error we expect is that the queue is empty, in which case we go to sleep
 					break
 				}
+
 				fname := obj.(string)
 				lsn := dbutils.InvalidLsn
 				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
 					var err error
+
 					lsn, err = utils.GetLSNFromDeltaFilename(filename)
 					if err != nil {
 						log.Printf("could not decode lsn from the file name %s: %v", filename)
@@ -290,10 +312,11 @@ func (t *TableBackup) archiver() {
 					if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
 						log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
 							fname, t.firstDeltaLSNToKeep)
-						// a  code in RunBasebackup will take care of removing actual files from the temp directory
+						// RunBasebackup() will take care of removing actual files from the temp directory
 						return false, nil
 					}
-					err := archiveOneFile(path.Join(t.tempDir, fname), path.Join(t.finalDir, fname), t.cfg.Fsync)
+					err := archiveOneFile(path.Join(t.stagingDir, fname), path.Join(t.archiveDir, fname), t.cfg.Fsync)
+
 					return err != nil, err
 				}
 
@@ -381,8 +404,8 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 		// for the basebackup we always come up with the same path, and therefore, needs to remove the previous backup
 		// if we fail, it is not an issue, since we have both basebackup and info file in the staging directory.
 		// TODO: make sure we properly archive the leftovers of.copy and info file on restart
-		if basename := path.Base(destFile); basename == basebackupFilename ||
-			basename == tableInfoFilename ||
+		if basename := path.Base(destFile); basename == BasebackupFilename ||
+			basename == TableInfoFilename ||
 			st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
@@ -415,6 +438,7 @@ func (t *TableBackup) updateMetricsForArchiver(isTimeout bool) {
 		filesCounter = promexporter.FilesArchivedCounter
 		perTableFilesCounter = promexporter.PerTablesFilesArchivedCounter
 	}
+
 	t.prom.Inc(filesCounter, nil)
 	t.prom.Inc(perTableFilesCounter, []string{t.ID().String(), t.TextID()})
 }
@@ -424,7 +448,7 @@ func (t *TableBackup) Files() int {
 }
 
 func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
-	filename := path.Join(deltasDirName, fmt.Sprintf("%016x", uint64(newLSN)))
+	filename := fmt.Sprintf("%016x", uint64(newLSN))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
 	if _, err := os.Stat(filename); t.lastLSN == newLSN || !os.IsNotExist(err) {
 		if err != nil && !os.IsNotExist(err) {
@@ -447,15 +471,16 @@ func (t *TableBackup) String() string {
 }
 
 func (t *TableBackup) createDirs() error {
-	deltasPath := path.Join(t.tempDir, deltasDirName)
-	archiveDeltasPath := path.Join(t.finalDir, deltasDirName)
-
-	if _, err := os.Stat(deltasPath); os.IsNotExist(err) {
-		if err := os.MkdirAll(deltasPath, dirPerms); err != nil {
-			return fmt.Errorf("could not create delta dir: %v", err)
+	if t.stagingDir != "" {
+		stagingDeltasPath := path.Join(t.stagingDir, deltasDirName)
+		if _, err := os.Stat(stagingDeltasPath); os.IsNotExist(err) {
+			if err := os.MkdirAll(stagingDeltasPath, dirPerms); err != nil {
+				return fmt.Errorf("could not create staging delta dir: %v", err)
+			}
 		}
 	}
 
+	archiveDeltasPath := path.Join(t.archiveDir, deltasDirName)
 	if _, err := os.Stat(archiveDeltasPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(archiveDeltasPath, dirPerms); err != nil {
 			return fmt.Errorf("could not create archive delta dir: %v", err)
@@ -474,26 +499,8 @@ func (t *TableBackup) hasRows() (bool, error) {
 	return hasRows, err
 }
 
-func (t *TableBackup) Truncate() error {
-	t.segmentBufferMutex.Lock()
-	defer t.segmentBufferMutex.Unlock()
-	if err := os.RemoveAll(t.tempDir); err != nil {
-		return fmt.Errorf("could not recreate table dir: %v", err)
-	}
-
-	if err := t.createDirs(); err != nil {
-		return err
-	}
-
-	t.startNewSegment(dbutils.InvalidLsn)
-	t.segmentsCnt = 0
-	t.filenamePostfix = 0
-
-	return nil
-}
-
 func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
-	if name == t.basebackupFilename || name == t.infoFilename {
+	if name == BasebackupFilename || name == TableInfoFilename {
 		return false, name
 	}
 	dir, file := path.Split(name)
@@ -572,7 +579,7 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 	}
 
 	if fsync {
-		if err = utils.SyncFileAndDirectory(destination, dst, path.Dir(dst)); err != nil {
+		if err = utils.SyncFileAndDirectory(destination); err != nil {
 			return nBytes, fmt.Errorf("could not sync %s: %v", dst, err)
 		}
 	}

@@ -10,7 +10,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/message"
 )
 
-func (t *TableBackup) initPostgresql(conn *pgx.Conn) (*pgtype.ConnInfo, error) {
+func initPostgresql(conn *pgx.Conn) (*pgtype.ConnInfo, error) {
 	const (
 		namedOIDQuery = `select t.oid,
 	case when nsp.nspname in ('pg_catalog', 'public') then t.typname
@@ -25,7 +25,7 @@ where (
 	)`
 	)
 
-	nameOIDs, err := t.connInfoFromRows(conn.Query(namedOIDQuery))
+	nameOIDs, err := connInfoFromRows(conn.Query(namedOIDQuery))
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ where (
 	cinfo := pgtype.NewConnInfo()
 	cinfo.InitializeDataTypes(nameOIDs)
 
-	if err = t.initConnInfoEnumArray(conn, cinfo); err != nil {
+	if err = initConnInfoEnumArray(conn, cinfo); err != nil {
 		return nil, err
 	}
 
@@ -41,7 +41,7 @@ where (
 }
 
 // initConnInfoEnumArray introspects for arrays of enums and registers a data type for them.
-func (t *TableBackup) initConnInfoEnumArray(conn *pgx.Conn, cinfo *pgtype.ConnInfo) error {
+func initConnInfoEnumArray(conn *pgx.Conn, cinfo *pgtype.ConnInfo) error {
 	nameOIDs := make(map[string]pgtype.OID, 16)
 	rows, err := conn.Query(`select t.oid, t.typname
 from pg_type t
@@ -77,7 +77,7 @@ where t.typtype = 'b'
 	return nil
 }
 
-func (t *TableBackup) connInfoFromRows(rows *pgx.Rows, err error) (map[string]pgtype.OID, error) {
+func connInfoFromRows(rows *pgx.Rows, err error) (map[string]pgtype.OID, error) {
 	if err != nil {
 		return nil, err
 	}

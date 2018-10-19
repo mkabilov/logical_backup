@@ -13,8 +13,6 @@ import (
 )
 
 func main() {
-	defer log.Printf("successfully shut down")
-
 	ctx, done := context.WithCancel(context.Background())
 	stopCh := make(chan struct{}, 128)
 
@@ -92,4 +90,6 @@ loop:
 
 	done()
 	lb.Wait()
+
+	log.Printf("successfully shut down")
 }

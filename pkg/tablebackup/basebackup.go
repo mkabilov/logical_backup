@@ -237,7 +237,7 @@ func (t *TableBackup) connect() error {
 		return fmt.Errorf("could not connect: %v", err)
 	}
 
-	connInfo, err := t.initPostgresql(conn)
+	connInfo, err := initPostgresql(conn)
 	if err != nil {
 		return fmt.Errorf("could not fetch conn info: %v", err)
 	}

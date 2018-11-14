@@ -45,6 +45,7 @@ type TableBackuper interface {
 	ID() dbutils.Oid
 	TextID() string
 	SetTextID(name message.NamespacedName)
+	Stop()
 }
 
 type TableBaseBackup interface {
@@ -57,8 +58,9 @@ type TableBaseBackup interface {
 type TableBackup struct {
 	message.NamespacedName
 
-	ctx  context.Context
-	wait *sync.WaitGroup
+	ctx    context.Context
+	wait   *sync.WaitGroup
+	cancel context.CancelFunc
 
 	// Table info
 	oid         dbutils.Oid
@@ -109,10 +111,13 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom promexporter.PrometheusExporterInterface) (*TableBackup, error) {
 	tableDir := utils.TableDir(oid)
 
+	perTableContext, cancel := context.WithCancel(ctx)
+
 	tb := TableBackup{
 		NamespacedName:      tbl,
 		oid:                 oid,
-		ctx:                 ctx,
+		ctx:                 perTableContext,
+		cancel:              cancel,
 		wait:                group,
 		sleepBetweenBackups: time.Second * 3,
 		cfg:                 cfg,
@@ -143,6 +148,11 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 	}
 
 	return &tb, nil
+}
+
+func (t *TableBackup) Stop() {
+	log.Printf("terminating processing of table %v", t)
+	t.cancel()
 }
 
 func (t *TableBackup) queueArchiveFile(filename string) {

@@ -66,13 +66,61 @@ type LogicalBackuper interface {
 	Wait()
 }
 
+type BackupTables struct {
+	sync.RWMutex
+	data map[dbutils.Oid]tablebackup.TableBackuper
+}
+
+func NewBackupTables() *BackupTables {
+	return &BackupTables{sync.RWMutex{}, make(map[dbutils.Oid]tablebackup.TableBackuper)}
+}
+
+func (bt *BackupTables) GetIfExists(oid dbutils.Oid) tablebackup.TableBackuper {
+	bt.RLock()
+	defer bt.RUnlock()
+
+	return bt.data[oid]
+}
+
+func (bt *BackupTables) Get(oid dbutils.Oid) (result tablebackup.TableBackuper, ok bool) {
+	bt.RLock()
+	defer bt.RUnlock()
+
+	result, ok = bt.data[oid]
+	return
+}
+
+func (bt *BackupTables) Set(oid dbutils.Oid, t tablebackup.TableBackuper) {
+	bt.Lock()
+	defer bt.Unlock()
+
+	bt.data[oid] = t
+}
+
+func (bt *BackupTables) Delete(oid dbutils.Oid) {
+	bt.Lock()
+	defer bt.Unlock()
+
+	delete(bt.data, oid)
+}
+
+func (bt *BackupTables) Map(fn func(t tablebackup.TableBackuper)) {
+	bt.Lock()
+	defer bt.Unlock()
+
+	for _, t := range bt.data {
+		fn(t)
+	}
+}
+
 type LogicalBackup struct {
 	ctx context.Context
 	cfg *config.Config
 
 	pluginArgs []string
 
-	backupTables     map[dbutils.Oid]tablebackup.TableBackuper
+	backupTables *BackupTables
+
 	tableNameChanges oidToName
 
 	dbCfg    pgx.ConnConfig
@@ -129,7 +177,7 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 
 		replMessageWaitTimeout: waitTimeout,
 		statusTimeout:          statusTimeout,
-		backupTables:           make(map[dbutils.Oid]tablebackup.TableBackuper),
+		backupTables:           NewBackupTables(),
 		relationMessages:       make(map[dbutils.Oid][]byte),
 		tableNameChanges:       oidToName{nameChangeHistory: make(map[dbutils.Oid][]NameAtLsn)},
 		pluginArgs:             []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
@@ -232,7 +280,7 @@ func (b *LogicalBackup) baseDir() string {
 }
 
 func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg []byte) error {
-	bt, ok := b.backupTables[tableOID]
+	bt, ok := b.backupTables.Get(tableOID)
 	if !ok {
 		log.Printf("table with OID %d is not tracked", tableOID)
 		return nil
@@ -311,7 +359,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 	case message.Commit:
 		for relOID := range b.txBeginRelMsg {
-			tb := b.backupTables[relOID]
+			tb := b.backupTables.GetIfExists(relOID)
 			if err = b.WriteCommandDataForTable(tb, v.Raw, cCommit); err != nil {
 				return err
 			}
@@ -345,7 +393,7 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 // act on a new relation message. We act on table renames, drops and recreations and new tables
 func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
-	if _, isRegistered := b.backupTables[m.OID]; !isRegistered {
+	if _, isRegistered := b.backupTables.Get(m.OID); !isRegistered {
 		if track, err := b.registerNewTable(m); !track || err != nil {
 			if err != nil {
 				return fmt.Errorf("could not add a backup process for the new table %s: %v", m.NamespacedName, err)
@@ -373,7 +421,7 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 		return false, err
 	}
 
-	b.backupTables[m.OID] = tb
+	b.backupTables.Set(m.OID, tb)
 	log.Printf("registered new table with oid %d and name %s", m.OID, m.NamespacedName.Sanitize())
 
 	return true, nil
@@ -643,7 +691,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
 
-		b.backupTables[t.oid] = tb
+		b.backupTables.Set(t.oid, tb)
 
 		// register the new table OID to name mapping
 		b.maybeRegisterNewName(t.oid, tb.NamespacedName)
@@ -735,10 +783,16 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 
 		t := obj.(tablebackup.TableBackuper)
 		log.Printf("background base backuper %d: backing up table %s", i, t)
-		if err := t.RunBasebackup(); err != nil && err != context.Canceled {
-			log.Printf("could not basebackup %s: %v", t, err)
+		if err := t.RunBasebackup(); err != nil {
+			if err == tablebackup.ErrTableNotFound {
+				// Remove the table from the list of those to backup.
+				// Hold the mutex to protect against concurrent access in QueueBasebackupTables
+				t.Stop()
+				b.backupTables.Delete(t.ID())
+			} else if err != context.Canceled {
+				log.Printf("could not basebackup %s: %v", t, err)
+			}
 		}
-
 		// from now on we can schedule new basebackups on that table
 		t.ClearBasebackupPending()
 	}
@@ -746,10 +800,11 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 
 // TODO: make it a responsibility of periodicBackup on a table itself
 func (b *LogicalBackup) QueueBasebackupTables() {
-	for _, t := range b.backupTables {
+	// need to hold the mutex here to prevent concurrent deletion of entries in the map.
+	b.backupTables.Map(func(t tablebackup.TableBackuper) {
 		b.basebackupQueue.Put(t)
 		t.SetBasebackupPending()
-	}
+	})
 }
 
 func (b *LogicalBackup) Run() {
@@ -824,7 +879,7 @@ func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.Names
 		b.tableNameChanges.isChanged = true
 
 		// inform the tableBackuper about the new name
-		b.backupTables[oid].SetTextID(name)
+		b.backupTables.GetIfExists(oid).SetTextID(name)
 	}
 }
 
@@ -964,7 +1019,7 @@ func (b *LogicalBackup) updateMetricsAfterWriteDelta(t tablebackup.TableBackuper
 func (b *LogicalBackup) updateMetricsOnCommit(commitTimestamp int64) {
 
 	for relOID := range b.txBeginRelMsg {
-		tb := b.backupTables[relOID]
+		tb := b.backupTables.GetIfExists(relOID)
 		b.prom.Set(prom.PerTableLastCommitTimestampGauge, float64(commitTimestamp), []string{tb.ID().String(), tb.TextID()})
 	}
 

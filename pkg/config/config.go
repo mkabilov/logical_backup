@@ -9,6 +9,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+const (
+	DefaultPrometheusPort = 1999
+)
+
 type Config struct {
 	DB                                     pgx.ConnConfig `yaml:"db"`
 	Slotname                               string         `yaml:"slotname"`
@@ -40,6 +44,11 @@ func New(filename string) (*Config, error) {
 	}
 	// forcing backups with sub-minute inactivity period makes no sense.
 	cfg.ForceBasebackupAfterInactivityInterval = cfg.ForceBasebackupAfterInactivityInterval.Truncate(1 * time.Minute)
+
+	// pin Prometheus port to 19999 by default.
+	if cfg.PrometheusPort == 0 {
+		cfg.PrometheusPort = DefaultPrometheusPort
+	}
 
 	return &cfg, nil
 }

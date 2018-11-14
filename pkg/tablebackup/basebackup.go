@@ -2,6 +2,7 @@ package tablebackup
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -19,8 +20,19 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
+const (
+	ErrCodeTableNotFound = "42P01"
+)
+
+var (
+	ErrTableNotFound = errors.New("table not found")
+)
+
+// RunBaseBackup produces a 'snapshot' of the table (using COPY).
+// It returns false if the table doesn't exist, otherwise true alongside the error if any
 func (t *TableBackup) RunBasebackup() error {
 	//TODO: split me into several methods
+
 	var (
 		backupLSN, preBackupLSN, postBackupLSN dbutils.Lsn
 		tableInfoDir                           string
@@ -103,7 +115,12 @@ func (t *TableBackup) RunBasebackup() error {
 		}
 		postBackupLSN = t.lastLSN
 
-		if err := t.lockTable(); err != nil {
+		exists, err := t.lockTableAndCheckIfExists()
+		if !exists {
+			log.Printf("table %v has been dropped, removing it from the backup", t)
+			return true, ErrTableNotFound
+		}
+		if err != nil {
 			return true, fmt.Errorf("could not lock table: %v", err)
 		}
 
@@ -282,12 +299,23 @@ func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
 	return nil
 }
 
-func (t *TableBackup) lockTable() error {
+// lockTableAndCheckIfExists returns whether the table exists as the first return value by looking
+// at the error code of the message it gets when it cannot lock the table.
+func (t *TableBackup) lockTableAndCheckIfExists() (bool, error) {
+	tableExists := true
+
 	if _, err := t.tx.Exec(fmt.Sprintf("LOCK TABLE %s IN ACCESS SHARE MODE", t.NamespacedName.Sanitize())); err != nil {
-		return fmt.Errorf("could not lock the table: %v", err)
+		// check if the error comes from the server
+		switch e := err.(type) {
+		case pgx.PgError:
+			if e.Code == ErrCodeTableNotFound { // undefined_table
+				tableExists = false
+			}
+		}
+		return tableExists, err
 	}
 
-	return nil
+	return tableExists, nil
 }
 
 func (t *TableBackup) txBegin() error {

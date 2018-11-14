@@ -86,7 +86,7 @@ func (t *TableBackup) RunBasebackup() error {
 	stop, err := func() (stop bool, err error) {
 		// do rollback if the code has thrown an error or simply found no rows, otherwise commit the changes.
 		// if the error happens during rollback or commit we either return it, if it is the first error in the
-		// transaction, or show it to the user to if there was a prior one, to avoid making that prior one.
+		// transaction, or show it to the user if there was a prior one, to avoid masking that prior one.
 		if err := t.txBegin(); err != nil {
 			return true, fmt.Errorf("could not start transaction: %v", err)
 		}
@@ -108,12 +108,12 @@ func (t *TableBackup) RunBasebackup() error {
 				}
 			}
 		}()
-		preBackupLSN = t.lastLSN
+		preBackupLSN = t.segmentStartLSN
 		backupLSN, err = t.createTempReplicationSlot()
 		if err != nil { // slot will be dropped on tx finish
 			return true, fmt.Errorf("could not create replication slot: %v", err)
 		}
-		postBackupLSN = t.lastLSN
+		postBackupLSN = t.segmentStartLSN
 
 		exists, err := t.lockTableAndCheckIfExists()
 		if !exists {

@@ -22,7 +22,6 @@ type Config struct {
 	BackupThreshold                        int            `yaml:"backupThreshold"`
 	ConcurrentBasebackups                  int            `yaml:"concurrentBasebackups"`
 	InitialBasebackup                      bool           `yaml:"initialBasebackup"`
-	SendStatusOnCommit                     bool           `yaml:"sendStatusOnCommit"`
 	Fsync                                  bool           `yaml:"fsync"`
 	StagingDir                             string         `yaml:"StagingDir"`
 	ArchiveDir                             string         `yaml:"archiveDir"`

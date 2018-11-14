@@ -24,6 +24,10 @@ func (l *Lsn) Parse(lsn string) error {
 	return nil
 }
 
+func (l Lsn) IsValid() bool {
+	return l != InvalidLsn
+}
+
 type Oid uint32
 
 func (o Oid) String() string {

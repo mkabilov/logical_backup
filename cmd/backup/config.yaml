@@ -5,7 +5,6 @@ concurrentBasebackups: 5
 trackNewTables: true
 slotname: myslot
 publication: mypub
-sendStatusOnCommit: false
 initialBasebackup: true
 fsync: true
 archiveDir: /tmp/final

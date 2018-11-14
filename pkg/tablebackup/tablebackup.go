@@ -39,12 +39,13 @@ const (
 type TableBackuper interface {
 	TableBaseBackup
 
-	WriteDelta([]byte, dbutils.Lsn) (uint64, error)
+	WriteDelta([]byte, dbutils.Lsn, dbutils.Lsn) (uint64, error)
 	Files() int
 	String() string
 	ID() dbutils.Oid
 	TextID() string
 	SetTextID(name message.NamespacedName)
+	GetFlushLSN() (flushLSN dbutils.Lsn, changedSinceLastFlush bool)
 	Stop()
 }
 
@@ -81,7 +82,10 @@ type TableBackup struct {
 	deltaCnt             int
 	segmentsCnt          int
 	deltasSinceBackupCnt int
-	lastLSN              dbutils.Lsn
+	segmentStartLSN      dbutils.Lsn
+	// Data for LSNs below and including this one for a given table are guaranteed to be flushed.
+	flushLSN   dbutils.Lsn
+	currentLSN dbutils.Lsn
 
 	segmentBufferMutex *sync.Mutex
 	segmentFilename    string
@@ -161,10 +165,14 @@ func (t *TableBackup) queueArchiveFile(filename string) {
 	}
 }
 
-func (t *TableBackup) WriteDelta(msg []byte, lsn dbutils.Lsn) (uint64, error) {
+// WriteDelta writes the delta into the current table segment. It is responsible for triggering the switch to the
+// new segment once the current one receives more than DeltasPerFile changes. For that sake, we pass a currentLSN
+// to it, so that it will set a flushLSN to it once the segment is switched and flushed.
+func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.Lsn, currentLSN dbutils.Lsn) (uint64, error) {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
 
+	// TODO: factor out switch into a separte routine.
 	// should we switch to the new segment already?
 	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
 		if t.segmentFilename != "" {
@@ -173,7 +181,8 @@ func (t *TableBackup) WriteDelta(msg []byte, lsn dbutils.Lsn) (uint64, error) {
 				return 0, fmt.Errorf("could not save current message; %v", err)
 			}
 		}
-		t.startNewSegment(lsn)
+		// TODO: why use commitLSN and not a current one?
+		t.startNewSegment(commitLSN)
 	}
 
 	if t.segmentsCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
@@ -185,14 +194,14 @@ func (t *TableBackup) WriteDelta(msg []byte, lsn dbutils.Lsn) (uint64, error) {
 	length := uint64(len(msg) + 8)
 	binary.BigEndian.PutUint64(t.msgLen, length)
 
-	if err := t.appendDeltaToSegment(append(t.msgLen, msg...)); err != nil {
+	if err := t.appendDeltaToSegment(append(t.msgLen, msg...), currentLSN); err != nil {
 		log.Printf("could not append delta to the current segment buffer: %v", err)
 	}
 
 	return length, nil
 }
 
-func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
+func (t *TableBackup) appendDeltaToSegment(currentDelta []byte, currentLSN dbutils.Lsn) error {
 	var err error
 
 	if _, err = t.segmentBuffer.Write(currentDelta); err != nil {
@@ -202,6 +211,7 @@ func (t *TableBackup) appendDeltaToSegment(currentDelta []byte) error {
 	t.deltaCnt++
 	t.deltasSinceBackupCnt++
 	t.lastWrittenMessage = time.Now()
+	t.currentLSN = currentLSN
 
 	return err
 }
@@ -233,7 +243,8 @@ func (t *TableBackup) writeSegmentToFile() error {
 			return err
 		}
 	}
-	log.Printf("flushed current segment to disk file %s", deltaFilepath)
+	t.flushLSN = t.currentLSN
+	log.Printf("flushed current segment to disk file %s and set flush LSN to %s", deltaFilepath, t.flushLSN)
 	t.queueArchiveFile(path.Join(DeltasDirName, t.segmentFilename))
 
 	return err
@@ -245,7 +256,7 @@ func (t *TableBackup) startNewSegment(startLSN dbutils.Lsn) {
 	if startLSN != 0 {
 		t.setSegmentFilename(startLSN)
 
-		t.lastLSN = startLSN
+		t.segmentStartLSN = startLSN
 		t.segmentsCnt++
 	} else {
 		t.segmentFilename = ""
@@ -460,7 +471,7 @@ func (t *TableBackup) Files() int {
 func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
 	filename := fmt.Sprintf("%016x", uint64(newLSN))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
-	if _, err := os.Stat(filename); t.lastLSN == newLSN || !os.IsNotExist(err) {
+	if _, err := os.Stat(filename); t.segmentStartLSN == newLSN || !os.IsNotExist(err) {
 		if err != nil && !os.IsNotExist(err) {
 			fmt.Printf("could not stat %q: %s", filename, err)
 		}
@@ -559,6 +570,10 @@ func (tb *TableBackup) TextID() string {
 
 func (tb *TableBackup) SetTextID(name message.NamespacedName) {
 	tb.currentName = name
+}
+
+func (tb *TableBackup) GetFlushLSN() (lsn dbutils.Lsn, changedSinceLastFlush bool) {
+	return tb.flushLSN, tb.flushLSN != tb.currentLSN
 }
 
 func copyFile(src, dst string, fsync bool) (int64, error) {

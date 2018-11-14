@@ -4,7 +4,6 @@ concurrentBasebackups: 5
 trackNewTables: true
 slotname: testslot
 publication: mypub
-sendStatusOnCommit: false
 initialBasebackup: true
 fsync: true
 archiveDir: /tmp/final

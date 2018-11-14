@@ -130,10 +130,10 @@ type LogicalBackup struct {
 	replMessageWaitTimeout time.Duration
 	statusTimeout          time.Duration
 
-	storedFlushLSN dbutils.Lsn
-	startLSN       dbutils.Lsn
-	flushLSN       dbutils.Lsn
-	lastTxId       int32
+	currentLSN           dbutils.Lsn // latest received LSN
+	transactionCommitLSN dbutils.Lsn // commit LSN of the latest observed transaction (obtained when reading BEGIN)
+	latestFlushLSN       dbutils.Lsn // latest LSN flushed to disk
+	lastTxId             int32       // transaction ID of the latest observed transaction (obtained when reading BEGIN)
 
 	basebackupQueue *queue.Queue
 	waitGr          *sync.WaitGroup
@@ -154,7 +154,6 @@ type LogicalBackup struct {
 
 func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
 	var (
-		startLSN   dbutils.Lsn
 		slotExists bool
 		err        error
 	)
@@ -223,10 +222,12 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		return nil, err
 	}
 
-	slotExists, err = lb.initSlot(conn)
+	lb.latestFlushLSN, err = lb.initSlot(conn)
 	if err != nil {
 		return nil, fmt.Errorf("could not init replication slot; %v", err)
 	}
+	// invalid start LSN and no error from initSlot denotes a non-existing slot.
+	slotExists = lb.latestFlushLSN.IsValid()
 
 	//TODO: have a separate "init" command which will set replica identity and create replication slots/publications
 	if rc, err := pgx.ReplicationConnect(cfg.DB); err != nil {
@@ -236,26 +237,31 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 	}
 
 	if !slotExists {
+		// TODO: this will discard all existing backup data, we should probably bail out if existing backup is there
 		log.Printf("Creating logical replication slot %s", lb.cfg.Slotname)
 
-		startLSN, err := lb.createSlot(conn)
+		initialLSN, err := lb.createSlot(conn)
 		if err != nil {
 			return nil, fmt.Errorf("could not create replication slot: %v", err)
 		}
-		log.Printf("Created missing replication slot %q, consistent point %s", lb.cfg.Slotname, startLSN)
+		log.Printf("Created missing replication slot %q, consistent point %s", lb.cfg.Slotname, initialLSN)
 
-		lb.startLSN = startLSN
-		if err := lb.storeRestartLSN(); err != nil {
-			log.Printf("could not store current LSN: %v", err)
+		lb.latestFlushLSN = initialLSN
+
+		if err := lb.writeRestartLSN(); err != nil {
+			log.Printf("could not store initial LSN: %v", err)
 		}
 	} else {
-		startLSN, err = lb.readRestartLSN()
+		restartLSN, err := lb.readRestartLSN()
 		if err != nil {
-			return nil, fmt.Errorf("could not read last lsn: %v", err)
+			return nil, fmt.Errorf("could not read previous flush lsn: %v", err)
 		}
-		if startLSN != 0 {
-			lb.startLSN = startLSN
-			lb.storedFlushLSN = startLSN
+		if restartLSN.IsValid() {
+			lb.latestFlushLSN = restartLSN
+		}
+		// we may have flushed the final segment at shutdown without bothering to advance the slot LSN.
+		if err := lb.sendStatus(); err != nil {
+			log.Printf("could not send replay progress: %v", err)
 		}
 	}
 
@@ -319,8 +325,7 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.Oid, cmd cmdType, msg
 }
 
 func (b *LogicalBackup) WriteCommandDataForTable(t tablebackup.TableBackuper, msg []byte, cmd cmdType) error {
-
-	ln, err := t.WriteDelta(msg, b.flushLSN)
+	ln, err := t.WriteDelta(msg, b.transactionCommitLSN, b.currentLSN)
 	if err != nil {
 		return err
 	}
@@ -352,12 +357,15 @@ func (b *LogicalBackup) handler(m message.Message) error {
 
 	case message.Begin:
 		b.lastTxId = v.XID
-		b.flushLSN = v.FinalLSN
+		b.transactionCommitLSN = v.FinalLSN
 
 		b.txBeginRelMsg = make(map[dbutils.Oid]struct{})
 		b.beginMsg = v.Raw
 
 	case message.Commit:
+		// commit is special, because the LSN of the CopyData message points past the commit message.
+		// for consistency we set the currentLSN here to the commit message LSN inside the commit itself.
+		b.currentLSN = v.LSN
 		for relOID := range b.txBeginRelMsg {
 			tb := b.backupTables.GetIfExists(relOID)
 			if err = b.WriteCommandDataForTable(tb, v.Raw, cCommit); err != nil {
@@ -365,20 +373,27 @@ func (b *LogicalBackup) handler(m message.Message) error {
 			}
 		}
 
-		b.updateMetricsOnCommit(v.Timestamp.Unix())
-
 		// if there were any changes in the table names, flush the map file
 		if err := b.flushOidNameMap(); err != nil {
 			log.Printf("could not flush the oid to map file: %v", err)
 		}
 
-		if !b.cfg.SendStatusOnCommit {
-			break
+		candidateFlushLSN := b.getNextFlushLSN()
+
+		if candidateFlushLSN > b.latestFlushLSN {
+			b.latestFlushLSN = candidateFlushLSN
+			log.Printf("advanced flush LSN to %s", b.latestFlushLSN)
+
+			if err := b.writeRestartLSN(); err != nil {
+				log.Printf("could not store flush LSN: %v", err)
+			}
+
+			if err = b.sendStatus(); err != nil {
+				log.Printf("could not send replay progress: %v", err)
+			}
 		}
 
-		if err == nil {
-			err = b.sendStatus()
-		}
+		b.updateMetricsOnCommit(v.Timestamp.Unix())
 
 	case message.Origin:
 		//TODO:
@@ -389,6 +404,45 @@ func (b *LogicalBackup) handler(m message.Message) error {
 	}
 
 	return err
+}
+
+// getNextFlushLSN computes a minimum among flush LSNs of all tables that are part of the logical backup.
+// As we flush data by reaching deltasPerFile changes since the last flush and each table is written into
+// its own file, the LSNs that are guaranteed to be flushed may vary from one table to another.
+func (b *LogicalBackup) getNextFlushLSN() dbutils.Lsn {
+	result := b.transactionCommitLSN
+
+	b.backupTables.Map(func(table tablebackup.TableBackuper) {
+		flushLSN, isFlushRequired := table.GetFlushLSN()
+		// ignore tables that didn't change since the previous flush
+		if isFlushRequired && flushLSN < result {
+			result = flushLSN
+		}
+	})
+
+	return result
+}
+
+func printMessage(m message.Message, currentLSN dbutils.Lsn) {
+	printer := func(messageType string) {
+		log.Printf("received %s message with LSN %s", messageType, currentLSN)
+	}
+	switch m.(type) {
+	case message.Relation:
+		printer("relation")
+	case message.Begin:
+		printer("begin")
+	case message.Commit:
+		printer("commit")
+	case message.Insert:
+		printer("insert")
+	case message.Update:
+		printer("update")
+	case message.Delete:
+		printer("delete")
+	case message.Truncate:
+		printer("truncate")
+	}
 }
 
 // act on a new relation message. We act on table renames, drops and recreations and new tables
@@ -429,12 +483,12 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 
 func (b *LogicalBackup) sendStatus() error {
 	log.Printf("sending new status with %s flush lsn (i:%d u:%d d:%d b:%0.2fMb) ",
-		b.flushLSN, b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete], float64(b.bytesWritten)/1048576)
+		b.latestFlushLSN, b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete], float64(b.bytesWritten)/1048576)
 
 	b.msgCnt = make(map[cmdType]int)
 	b.bytesWritten = 0
 
-	status, err := pgx.NewStandbyStatus(uint64(b.flushLSN))
+	status, err := pgx.NewStandbyStatus(uint64(b.latestFlushLSN))
 
 	if err != nil {
 		return fmt.Errorf("error creating standby status: %s", err)
@@ -444,14 +498,6 @@ func (b *LogicalBackup) sendStatus() error {
 		return fmt.Errorf("failed to send standy status: %s", err)
 	}
 
-	if b.storedFlushLSN != b.flushLSN {
-		if err := b.storeRestartLSN(); err != nil {
-			return err
-		}
-	}
-
-	b.storedFlushLSN = b.flushLSN
-
 	return nil
 }
 
@@ -459,9 +505,9 @@ func (b *LogicalBackup) logicalDecoding() {
 	defer b.waitGr.Done()
 
 	// TODO: move out the initialization routines
-	log.Printf("Starting from %s lsn", b.startLSN)
+	log.Printf("Starting from %s lsn", b.latestFlushLSN)
 
-	err := b.replConn.StartReplication(b.cfg.Slotname, uint64(b.startLSN), -1, b.pluginArgs...)
+	err := b.replConn.StartReplication(b.cfg.Slotname, uint64(b.latestFlushLSN), -1, b.pluginArgs...)
 	if err != nil {
 		log.Printf("failed to start replication: %s", err)
 		b.stopCh <- struct{}{}
@@ -476,7 +522,7 @@ func (b *LogicalBackup) logicalDecoding() {
 			return
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
-				log.Printf("could not send status: %v", err)
+				log.Printf("could not send replay progress: %v", err)
 				b.stopCh <- struct{}{}
 				return
 			}
@@ -504,6 +550,7 @@ func (b *LogicalBackup) logicalDecoding() {
 			}
 
 			if repMsg.WalMessage != nil {
+				b.currentLSN = dbutils.Lsn(repMsg.WalMessage.WalStart)
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
 					log.Printf("invalid pgoutput message: %s", err)
@@ -520,7 +567,7 @@ func (b *LogicalBackup) logicalDecoding() {
 			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
 				log.Println("server wants a reply")
 				if err := b.sendStatus(); err != nil {
-					log.Printf("could not send status: %v", err)
+					log.Printf("could not send replay progress: %v", err)
 					b.stopCh <- struct{}{}
 					return
 				}
@@ -529,14 +576,12 @@ func (b *LogicalBackup) logicalDecoding() {
 	}
 }
 
-func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
-	slotExists := false
-
+func (b *LogicalBackup) initSlot(conn *pgx.Conn) (dbutils.Lsn, error) {
 	var lsn dbutils.Lsn
 
 	rows, err := conn.Query("select confirmed_flush_lsn, slot_type, database from pg_replication_slots where slot_name = $1;", b.cfg.Slotname)
 	if err != nil {
-		return false, fmt.Errorf("could not execute query: %v", err)
+		return dbutils.InvalidLsn, fmt.Errorf("could not execute query: %v", err)
 	}
 	defer rows.Close()
 
@@ -544,29 +589,26 @@ func (b *LogicalBackup) initSlot(conn *pgx.Conn) (bool, error) {
 		var lsnString, slotType, database string
 
 		if err := rows.Err(); err != nil {
-			return false, fmt.Errorf("could not execute query: %v", err)
+			return dbutils.InvalidLsn, fmt.Errorf("could not execute query: %v", err)
 		}
 
-		slotExists = true
 		if err := rows.Scan(&lsnString, &slotType, &database); err != nil {
-			return false, fmt.Errorf("could not scan lsn: %v", err)
+			return dbutils.InvalidLsn, fmt.Errorf("could not scan lsn: %v", err)
 		}
 
 		if slotType != logicalSlotType {
-			return false, fmt.Errorf("slot %q is not a logical slot", b.cfg.Slotname)
+			return dbutils.InvalidLsn, fmt.Errorf("slot %q is not a logical slot", b.cfg.Slotname)
 		}
 
 		if database != b.dbCfg.Database {
-			return false, fmt.Errorf("replication slot %q belongs to %q database", b.cfg.Slotname, database)
+			return dbutils.InvalidLsn, fmt.Errorf("replication slot %q belongs to %q database", b.cfg.Slotname, database)
 		}
 		if err := lsn.Parse(lsnString); err != nil {
-			return false, fmt.Errorf("could not parse lsn: %v", err)
-		} else {
-			b.startLSN = lsn
+			return dbutils.InvalidLsn, fmt.Errorf("could not parse lsn: %v", err)
 		}
 	}
 
-	return slotExists, nil
+	return lsn, nil
 }
 
 func (b *LogicalBackup) createSlot(conn *pgx.Conn) (dbutils.Lsn, error) {
@@ -705,37 +747,38 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	return nil
 }
 
+// returns the LSN from where we should restart reads from the slot,
+// InvalidLSN if no state file exists and error otherwise.
 func (b *LogicalBackup) readRestartLSN() (dbutils.Lsn, error) {
 	var stateInfo StateInfo
-
 	stateFilename := path.Join(b.baseDir(), stateFile)
 
 	if _, err := os.Stat(stateFilename); os.IsNotExist(err) {
-		return 0, nil
+		return dbutils.InvalidLsn, nil
 	}
 
 	fp, err := os.OpenFile(stateFilename, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return 0, fmt.Errorf("could not create current lsn file: %v", err)
+		return dbutils.InvalidLsn, fmt.Errorf("could not create current lsn file: %v", err)
 	}
 	defer fp.Close()
 
 	if err := yaml.NewDecoder(fp).Decode(&stateInfo); err != nil {
-		return 0, fmt.Errorf("could not decode state info yaml: %v", err)
+		return dbutils.InvalidLsn, fmt.Errorf("could not decode state info yaml: %v", err)
 	}
 
 	currentLSN, err := pgx.ParseLSN(stateInfo.CurrentLSN)
 	if err != nil {
-		return 0, fmt.Errorf("could not parse %q Lsn string: %v", stateInfo.CurrentLSN, err)
+		return dbutils.InvalidLsn, fmt.Errorf("could not parse %q Lsn string: %v", stateInfo.CurrentLSN, err)
 	}
 
 	return dbutils.Lsn(currentLSN), nil
 }
 
-func (b *LogicalBackup) storeRestartLSN() error {
+func (b *LogicalBackup) writeRestartLSN() error {
 	stateInfo := StateInfo{
 		Timestamp:  time.Now(),
-		CurrentLSN: b.flushLSN.String(),
+		CurrentLSN: b.latestFlushLSN.String(),
 	}
 
 	if b.cfg.StagingDir != "" {
@@ -875,7 +918,7 @@ func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.Oid, name message.Names
 	}
 	if b.tableNameChanges.nameChangeHistory[oid] == nil || lastEntry.Name != name {
 		b.tableNameChanges.nameChangeHistory[oid] = append(b.tableNameChanges.nameChangeHistory[oid],
-			NameAtLsn{Name: name, Lsn: b.flushLSN})
+			NameAtLsn{Name: name, Lsn: b.transactionCommitLSN})
 		b.tableNameChanges.isChanged = true
 
 		// inform the tableBackuper about the new name
@@ -1024,6 +1067,6 @@ func (b *LogicalBackup) updateMetricsOnCommit(commitTimestamp int64) {
 	}
 
 	b.prom.Inc(prom.TransactionCounter, nil)
-	b.prom.Set(prom.FlushLSNCGauge, float64(b.flushLSN), nil)
+	b.prom.Set(prom.FlushLSNCGauge, float64(b.transactionCommitLSN), nil)
 	b.prom.Set(prom.LastCommitTimestampGauge, float64(commitTimestamp), nil)
 }

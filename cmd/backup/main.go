@@ -40,7 +40,6 @@ func main() {
 	log.Printf("Backing up new tables: %t", cfg.TrackNewTables)
 
 	log.Printf("Fsync: %t", cfg.Fsync)
-	log.Printf("SendStatusOnCommit: %t", cfg.SendStatusOnCommit)
 	if cfg.ForceBasebackupAfterInactivityInterval > 0 {
 		log.Printf("Force new basebackup of a modified table after inactivity for: %v",
 			cfg.ForceBasebackupAfterInactivityInterval)

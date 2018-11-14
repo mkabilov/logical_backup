@@ -128,17 +128,7 @@ argument. The following keys can be defined in that file:
   set of tables to backup. LBT attempts to create one if it doesn't exist,
   defining it `FOR ALL TABLES`. If you need only a subset of tables you should
   create the corresponding publication beforehand.
-    
-* **sendStatusOnCommit**
-  Determines whether to send the standby status message
-  to the server on every commit. The server will act on a status message by
-  adjusting the WAL position of the data that is confirmed to be written by the
-  client, resulting in faster recycling of the old segments; however, in the
-  case of multiple small transactions sending the status after recording the
-  commit results in significant communication overhead. Given that the client
-  sends those status message every 10 seconds, we don't recommend enabling this
-  option unless you know exactly what you are doing.
-    
+        
 * **initialBasebackup** 
   If set to true, LBT will trigger the initial basebackup
   for all tables in the publication at startup. This feature could be useful to

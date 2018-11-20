@@ -45,23 +45,23 @@ type Message interface {
 
 type DeltaMessage interface {
 	GetSQL() string
-	GetLSN() dbutils.Lsn
-	GetRelationOID() dbutils.Oid
+	GetLSN() dbutils.LSN
+	GetRelationOID() dbutils.OID
 	GetTxId() int32
 }
 
 type DDLMessage struct {
-	LastLSN     dbutils.Lsn
+	LastLSN     dbutils.LSN
 	TxId        int32
-	RelationOID dbutils.Oid
+	RelationOID dbutils.OID
 	Origin      string
 	Query       string
 }
 
 type DMLMessage struct {
-	LastLSN     dbutils.Lsn
+	LastLSN     dbutils.LSN
 	TxId        int32
-	RelationOID dbutils.Oid
+	RelationOID dbutils.OID
 	Origin      string
 	Query       string
 }
@@ -74,8 +74,8 @@ type NamespacedName struct {
 type Column struct {
 	IsKey         bool        `yaml:"IsKey"`         // column as part of the key.
 	Name          string      `yaml:"Name"`          // Name of the column.
-	TypeOID       dbutils.Oid `yaml:"TypeOID"`       // OID of the column's data type.
-	Mode          int32       `yaml:"Mode"`          // TypeOID modifier of the column (atttypmod).
+	TypeOID       dbutils.OID `yaml:"OID"`           // OID of the column's data type.
+	Mode          int32       `yaml:"Mode"`          // OID modifier of the column (atttypmod).
 	FormattedType string      `yaml:"FormattedType"` //
 }
 
@@ -86,7 +86,7 @@ type Tuple struct {
 
 type Begin struct {
 	Raw       []byte
-	FinalLSN  dbutils.Lsn // LSN of the record that lead to this xact to be committed
+	FinalLSN  dbutils.LSN // LSN of the record that lead to this xact to be committed
 	Timestamp time.Time   // Commit timestamp of the transaction
 	XID       int32       // Xid of the transaction.
 }
@@ -94,29 +94,28 @@ type Begin struct {
 type Commit struct {
 	Raw            []byte
 	Flags          uint8       // Flags; currently unused (must be 0)
-	LSN            dbutils.Lsn // The LastLSN of the commit.
-	TransactionLSN dbutils.Lsn // LSN pointing to the end of the commit record + 1
+	LSN            dbutils.LSN // The LastLSN of the commit.
+	TransactionLSN dbutils.LSN // LSN pointing to the end of the commit record + 1
 	Timestamp      time.Time   // Commit timestamp of the transaction
 }
 
 type Origin struct {
 	Raw  []byte
-	LSN  dbutils.Lsn // The last LSN of the commit on the origin server.
+	LSN  dbutils.LSN // The last LSN of the commit on the origin server.
 	Name string
 }
 
 type Relation struct {
-	NamespacedName `yaml:"NamespacedName"`
-
+	NamespacedName  `yaml:"NamespacedName"`
 	Raw             []byte          `yaml:"-"`
-	OID             dbutils.Oid     `yaml:"OID"`             // OID of the relation.
+	OID             dbutils.OID     `yaml:"OID"`             // OID of the relation.
 	ReplicaIdentity ReplicaIdentity `yaml:"ReplicaIdentity"` // Replica identity
 	Columns         []Column        `yaml:"Columns"`         // Columns
 }
 
 type Insert struct {
 	Raw         []byte
-	RelationOID dbutils.Oid // OID of the relation corresponding to the OID in the relation message.
+	RelationOID dbutils.OID // OID of the relation corresponding to the OID in the relation message.
 	IsNew       bool        // Identifies tuple as a new tuple.
 
 	NewRow []Tuple
@@ -124,7 +123,7 @@ type Insert struct {
 
 type Update struct {
 	Raw         []byte
-	RelationOID dbutils.Oid /// OID of the relation corresponding to the OID in the relation message.
+	RelationOID dbutils.OID /// OID of the relation corresponding to the OID in the relation message.
 	IsKey       bool        // OldRow contains columns which are part of REPLICA IDENTITY index.
 	IsOld       bool        // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
 	IsNew       bool        // Identifies tuple as a new tuple.
@@ -135,7 +134,7 @@ type Update struct {
 
 type Delete struct {
 	Raw         []byte
-	RelationOID dbutils.Oid // OID of the relation corresponding to the OID in the relation message.
+	RelationOID dbutils.OID // OID of the relation corresponding to the OID in the relation message.
 	IsKey       bool        // OldRow contains columns which are part of REPLICA IDENTITY index.
 	IsOld       bool        // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
 
@@ -144,15 +143,14 @@ type Delete struct {
 
 type Truncate struct {
 	Raw             []byte
-	Relations       uint32
 	Cascade         bool
 	RestartIdentity bool
-	RelationOIDs    []dbutils.Oid
+	RelationOIDs    []dbutils.OID
 }
 
 type Type struct {
 	Raw       []byte
-	ID        dbutils.Oid // OID of the data type
+	OID       dbutils.OID // OID of the data type
 	Namespace string      // Namespace (empty string for pg_catalog).
 	Name      string      // Name of the data type
 }
@@ -310,11 +308,11 @@ func (m DMLMessage) GetSQL() string {
 	return m.Query
 }
 
-func (m DMLMessage) GetLSN() dbutils.Lsn {
+func (m DMLMessage) GetLSN() dbutils.LSN {
 	return m.LastLSN
 }
 
-func (m DMLMessage) GetRelationOID() dbutils.Oid {
+func (m DMLMessage) GetRelationOID() dbutils.OID {
 	return m.RelationOID
 }
 
@@ -326,11 +324,11 @@ func (m DDLMessage) GetSQL() string {
 	return m.Query
 }
 
-func (m DDLMessage) GetLSN() dbutils.Lsn {
+func (m DDLMessage) GetLSN() dbutils.LSN {
 	return m.LastLSN
 }
 
-func (m DDLMessage) GetRelationOID() dbutils.Oid {
+func (m DDLMessage) GetRelationOID() dbutils.OID {
 	return m.RelationOID
 }
 

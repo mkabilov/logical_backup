@@ -30,7 +30,7 @@ type LogicalRestorer interface {
 type LogicalRestore struct {
 	message.NamespacedName
 
-	startLSN dbutils.Lsn
+	startLSN dbutils.LSN
 	relInfo  message.Relation
 
 	conn *pgx.Conn
@@ -39,9 +39,9 @@ type LogicalRestore struct {
 	ctx  context.Context
 
 	baseDir string
-	tblOid  dbutils.Oid
+	tblOid  dbutils.OID
 	curTx   int32
-	curLsn  dbutils.Lsn
+	curLsn  dbutils.LSN
 }
 
 func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig) *LogicalRestore {
@@ -130,7 +130,7 @@ func (r *LogicalRestore) loadInfo() error {
 	if lsn, err := pgx.ParseLSN(info.StartLSN); err != nil {
 		return fmt.Errorf("could not parse lsn: %v", err)
 	} else {
-		r.startLSN = dbutils.Lsn(lsn) //TODO: move to pgx.LSN
+		r.startLSN = dbutils.LSN(lsn) //TODO: move to pgx.LSN
 	}
 
 	r.relInfo = info.Relation
@@ -210,7 +210,7 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			}
 
 			if v.FinalLSN < r.startLSN {
-				r.curLsn = dbutils.InvalidLsn
+				r.curLsn = dbutils.InvalidLSN
 				r.curTx = 0
 				break
 			}
@@ -219,15 +219,15 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			r.curLsn = v.FinalLSN
 
 			if err := r.begin(); err != nil {
-				err = fmt.Errorf("could not begin transaction: %v", err)
+				return fmt.Errorf("could not begin transaction: %v", err)
 			}
 		case message.Commit:
-			if r.curLsn != dbutils.InvalidLsn && r.curLsn != v.LSN {
+			if r.curLsn != dbutils.InvalidLSN && r.curLsn != v.LSN {
 				panic("final LSN does not match begin LSN")
 			}
 
 			if err := r.commit(); err != nil {
-				err = fmt.Errorf("could not commit transaction: %v", err)
+				return fmt.Errorf("could not commit transaction: %v", err)
 			}
 		case message.Origin:
 			//TODO
@@ -334,23 +334,23 @@ func (r *LogicalRestore) checkTableStruct() error {
 	return nil
 }
 
-func (r *LogicalRestore) getOid(tblName message.NamespacedName) (dbutils.Oid, error) {
-	history := make(map[dbutils.Oid][]logicalbackup.NameAtLsn)
+func (r *LogicalRestore) getOID(tblName message.NamespacedName) (dbutils.OID, error) {
+	history := make(map[dbutils.OID][]logicalbackup.NameAtLSN)
 
 	oidMapFilename := path.Join(r.baseDir, logicalbackup.OidNameMapFile)
 
 	fp, err := os.OpenFile(oidMapFilename, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return dbutils.InvalidOid, fmt.Errorf("could not open file: %v", err)
+		return dbutils.InvalidOID, fmt.Errorf("could not open file: %v", err)
 	}
 	defer fp.Close()
 
 	if err = yaml.NewDecoder(fp).Decode(&history); err != nil {
-		return dbutils.InvalidOid, fmt.Errorf("could not decode yaml: %v", err)
+		return dbutils.InvalidOID, fmt.Errorf("could not decode yaml: %v", err)
 	}
 
-	maxLsn := dbutils.InvalidLsn
-	lastOid := dbutils.InvalidOid
+	maxLsn := dbutils.InvalidLSN
+	lastOid := dbutils.InvalidOID
 	for oid, names := range history {
 		for _, n := range names {
 			if n.Name != tblName {
@@ -382,11 +382,11 @@ func (r *LogicalRestore) enableConstraints() error {
 }
 
 func (r *LogicalRestore) Restore() error {
-	tblOid, err := r.getOid(r.NamespacedName)
+	tblOid, err := r.getOID(r.NamespacedName)
 	if err != nil {
 		return fmt.Errorf("could not get oid of the table: %v", err)
 	}
-	if tblOid == dbutils.InvalidOid {
+	if tblOid == dbutils.InvalidOID {
 		return fmt.Errorf("could not find oid for the table, table does not exist?")
 	}
 

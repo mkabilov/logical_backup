@@ -34,7 +34,7 @@ func (t *TableBackup) RunBasebackup() error {
 	//TODO: split me into several methods
 
 	var (
-		backupLSN, preBackupLSN, postBackupLSN dbutils.Lsn
+		backupLSN, preBackupLSN, postBackupLSN dbutils.LSN
 		tableInfoDir                           string
 	)
 
@@ -101,10 +101,9 @@ func (t *TableBackup) RunBasebackup() error {
 				}
 			} else {
 				// in this case we also want to return this error
-				if err := t.txCommit(); err != nil {
+				if cErr := t.txCommit(); cErr != nil {
 					stop = true
-					err = fmt.Errorf("could not commit: %v", err)
-
+					err = fmt.Errorf("could not commit: %v", cErr)
 				}
 			}
 		}()
@@ -417,10 +416,10 @@ func (t *TableBackup) copyDump() error {
 	return nil
 }
 
-func (t *TableBackup) createTempReplicationSlot() (dbutils.Lsn, error) {
+func (t *TableBackup) createTempReplicationSlot() (dbutils.LSN, error) {
 	var createdSlotName, basebackupLSN, snapshotName, plugin sql.NullString
 
-	var lsn dbutils.Lsn
+	var lsn dbutils.LSN
 
 	if t.tx == nil {
 		return lsn, fmt.Errorf("no running transaction")

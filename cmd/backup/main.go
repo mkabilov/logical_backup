@@ -36,7 +36,7 @@ func main() {
 	log.Printf("DeltasPerFile: %v", cfg.DeltasPerFile)
 	log.Printf("DB connection string: %s@%s:%d/%s slot:%q publication:%q",
 		cfg.DB.User, cfg.DB.Host, cfg.DB.Port, cfg.DB.Database,
-		cfg.Slotname, cfg.PublicationName)
+		cfg.SlotName, cfg.PublicationName)
 	log.Printf("Backing up new tables: %t", cfg.TrackNewTables)
 
 	log.Printf("Fsync: %t", cfg.Fsync)
@@ -76,14 +76,13 @@ loop:
 			case syscall.SIGTERM:
 				break loop
 			case syscall.SIGHUP:
+				//TODO: reload the config?
 			default:
 				log.Printf("unhandled signal: %v", sig)
 			}
 		case <-stopCh:
-			{
-				log.Printf("received termination request, cleaning up...")
-				break loop
-			}
+			log.Printf("received termination request, cleaning up...")
+			break loop
 		}
 	}
 

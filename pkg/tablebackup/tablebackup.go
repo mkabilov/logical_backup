@@ -51,13 +51,13 @@ type tableBackupState struct {
 type TableBackuper interface {
 	TableBaseBackup
 
-	WriteDelta([]byte, dbutils.Lsn, dbutils.Lsn) (uint64, error)
+	WriteDelta([]byte, dbutils.LSN, dbutils.LSN) (uint64, error)
 	Files() int
 	String() string
-	ID() dbutils.Oid
+	ID() dbutils.OID
 	TextID() string
 	SetTextID(name message.NamespacedName)
-	GetFlushLSN() (flushLSN dbutils.Lsn, changedSinceLastFlush bool)
+	GetFlushLSN() (flushLSN dbutils.LSN, changedSinceLastFlush bool)
 	Stop()
 }
 
@@ -76,7 +76,7 @@ type TableBackup struct {
 	cancel context.CancelFunc
 
 	// Table info
-	oid         dbutils.Oid
+	oid         dbutils.OID
 	currentName message.NamespacedName
 
 	// Basebackup
@@ -94,11 +94,11 @@ type TableBackup struct {
 	deltaCnt             int
 	segmentsCnt          int
 	deltasSinceBackupCnt int
-	segmentStartLSN      dbutils.Lsn
+	segmentStartLSN      dbutils.LSN
 	// Data for LSNs below and including this one for a given table are guaranteed to be flushed.
-	flushLSN        dbutils.Lsn
-	currentLSN      dbutils.Lsn
-	latestCommitLSN dbutils.Lsn // we need to store it on disk at shutdown to name the first segment after the restart.
+	flushLSN        dbutils.LSN
+	currentLSN      dbutils.LSN
+	latestCommitLSN dbutils.LSN
 
 	segmentBufferMutex *sync.Mutex
 	segmentFilename    string
@@ -108,7 +108,7 @@ type TableBackup struct {
 	segmentBuffer bytes.Buffer
 
 	// Basebackup
-	firstDeltaLSNToKeep dbutils.Lsn
+	firstDeltaLSNToKeep dbutils.LSN
 	lastBasebackupTime  time.Time
 	lastBackupDuration  time.Duration
 	lastWrittenMessage  time.Time
@@ -123,7 +123,7 @@ type TableBackup struct {
 	prom              promexporter.PrometheusExporterInterface
 }
 
-func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.Oid,
+func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.OID,
 	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom promexporter.PrometheusExporterInterface) (*TableBackup, error) {
 	tableDir := utils.TableDir(oid)
 
@@ -184,7 +184,7 @@ func (t *TableBackup) queueArchiveFile(filename string) {
 // WriteDelta writes the delta into the current table segment. It is responsible for triggering the switch to the
 // new segment once the current one receives more than DeltasPerFile changes. For that sake, we pass a currentLSN
 // to it, so that it will set a flushLSN to it once the segment is switched and flushed.
-func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.Lsn, currentLSN dbutils.Lsn) (uint64, error) {
+func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN dbutils.LSN) (uint64, error) {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
 
@@ -224,7 +224,7 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.Lsn, currentLSN d
 	return length, nil
 }
 
-func (t *TableBackup) appendDeltaToSegment(currentDelta []byte, currentLSN dbutils.Lsn) error {
+func (t *TableBackup) appendDeltaToSegment(currentDelta []byte, currentLSN dbutils.LSN) error {
 	var err error
 
 	if _, err = t.segmentBuffer.Write(currentDelta); err != nil {
@@ -282,7 +282,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 	return err
 }
 
-func (t *TableBackup) startNewSegment(startLSN dbutils.Lsn) {
+func (t *TableBackup) startNewSegment(startLSN dbutils.LSN) {
 	t.segmentBuffer.Reset()
 
 	if startLSN != 0 {
@@ -351,7 +351,7 @@ func (t *TableBackup) archiver() {
 				}
 
 				fname := obj.(string)
-				lsn := dbutils.InvalidLsn
+				lsn := dbutils.InvalidLSN
 				if isDelta, filename := t.isDeltaFileName(fname); isDelta {
 					var err error
 
@@ -426,7 +426,7 @@ func (t *TableBackup) archiveCurrentSegment(reason string) error {
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
 	}
-	t.startNewSegment(dbutils.InvalidLsn)
+	t.startNewSegment(dbutils.InvalidLSN)
 
 	return nil
 }
@@ -500,7 +500,7 @@ func (t *TableBackup) Files() int {
 	return t.segmentsCnt
 }
 
-func (t *TableBackup) setSegmentFilename(newLSN dbutils.Lsn) {
+func (t *TableBackup) setSegmentFilename(newLSN dbutils.LSN) {
 	filename := fmt.Sprintf("%016x", uint64(newLSN))
 	// XXX: ignoring os.stat errors outside of 'file already exists'
 	if _, err := os.Stat(filename); t.segmentStartLSN == newLSN || !os.IsNotExist(err) {
@@ -592,7 +592,7 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 }
 
 // TODO: consider providing a pair of values identifying the table for prometheus in a single function call
-func (tb *TableBackup) ID() dbutils.Oid {
+func (tb *TableBackup) ID() dbutils.OID {
 	return tb.oid
 }
 
@@ -604,7 +604,7 @@ func (tb *TableBackup) SetTextID(name message.NamespacedName) {
 	tb.currentName = name
 }
 
-func (tb *TableBackup) GetFlushLSN() (lsn dbutils.Lsn, changedSinceLastFlush bool) {
+func (tb *TableBackup) GetFlushLSN() (lsn dbutils.LSN, changedSinceLastFlush bool) {
 	return tb.flushLSN, tb.flushLSN != tb.currentLSN
 }
 
@@ -632,11 +632,11 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 
 	nBytes, err := io.Copy(destination, source)
 	if err != nil {
-		return nBytes, fmt.Errorf("could not copy %s to %s: %v", err)
+		return nBytes, fmt.Errorf("could not copy %s to %s: %v", src, dst, err)
 	}
 
 	if fsync {
-		if err = utils.SyncFileAndDirectory(destination); err != nil {
+		if err := utils.SyncFileAndDirectory(destination); err != nil {
 			return nBytes, fmt.Errorf("could not sync %s: %v", dst, err)
 		}
 	}
@@ -706,12 +706,12 @@ func (t *TableBackup) LoadState() error {
 	if err != nil {
 		return fmt.Errorf("could not parse latest flush LSN %s: %v", state.LatestFlushLSN, err)
 	}
-	t.flushLSN = dbutils.Lsn(lsn)
+	t.flushLSN = dbutils.LSN(lsn)
 	lsn, err = pgx.ParseLSN(state.LatestCommitLSN)
 	if err != nil {
 		return fmt.Errorf("could not parse latest commit LSN %s: %v", state.LatestCommitLSN, err)
 	}
-	t.latestCommitLSN = dbutils.Lsn(lsn)
+	t.latestCommitLSN = dbutils.LSN(lsn)
 
 	t.lastWrittenMessage = state.LastWrittenMessage
 	t.segmentsCnt = int(state.SegmentsSinceBackupCount)

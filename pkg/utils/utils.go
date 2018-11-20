@@ -12,7 +12,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 )
 
-func TableDir(oid dbutils.Oid) string {
+func TableDir(oid dbutils.OID) string {
 	tblOidBytes := fmt.Sprintf("%08x", uint32(oid))
 
 	return path.Join(tblOidBytes[6:8], tblOidBytes[4:6], tblOidBytes[2:4], fmt.Sprintf("%d", oid))
@@ -62,7 +62,7 @@ loop:
 	return fmt.Errorf("did not succeed after %d attempts", numberOfAttempts)
 }
 
-func GetLSNFromDeltaFilename(filename string) (dbutils.Lsn, error) {
+func GetLSNFromDeltaFilename(filename string) (dbutils.LSN, error) {
 	lsnStr := filename
 	if strings.Contains(filename, ".") {
 		parts := strings.Split(filename, ".")
@@ -71,7 +71,7 @@ func GetLSNFromDeltaFilename(filename string) (dbutils.Lsn, error) {
 
 	lsn, err := strconv.ParseUint(lsnStr, 16, 64)
 
-	return dbutils.Lsn(lsn), err
+	return dbutils.LSN(lsn), err
 }
 
 func SyncFileAndDirectory(fp *os.File) error {

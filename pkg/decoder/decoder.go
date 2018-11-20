@@ -17,14 +17,19 @@ type decoder struct {
 	buf   *bytes.Buffer
 }
 
+const (
+	truncateCascadeBit         = 1
+	truncateRestartIdentityBit = 2
+)
+
 func (d *decoder) bool() bool { return d.buf.Next(1)[0] != 0 }
 
 func (d *decoder) uint8() uint8     { return d.buf.Next(1)[0] }
 func (d *decoder) uint16() uint16   { return d.order.Uint16(d.buf.Next(2)) }
 func (d *decoder) uint32() uint32   { return d.order.Uint32(d.buf.Next(4)) }
 func (d *decoder) uint64() uint64   { return d.order.Uint64(d.buf.Next(8)) }
-func (d *decoder) Oid() dbutils.Oid { return dbutils.Oid(d.order.Uint32(d.buf.Next(4))) }
-func (d *decoder) Lsn() dbutils.Lsn { return dbutils.Lsn(d.order.Uint64(d.buf.Next(8))) }
+func (d *decoder) OID() dbutils.OID { return dbutils.OID(d.uint32()) }
+func (d *decoder) LSN() dbutils.LSN { return dbutils.LSN(d.uint64()) }
 
 func (d *decoder) int8() int8   { return int8(d.uint8()) }
 func (d *decoder) int16() int16 { return int16(d.uint16()) }
@@ -78,12 +83,11 @@ func (d *decoder) columns() []message.Column {
 	size := int(d.uint16())
 	data := make([]message.Column, size)
 	for i := 0; i < size; i++ {
-		data[i] = message.Column{
-			IsKey:   d.bool(),
-			Name:    d.string(),
-			TypeOID: d.Oid(),
-			Mode:    d.int32(),
-		}
+		data[i] = message.Column{}
+		data[i].IsKey = d.bool()
+		data[i].Name = d.string()
+		data[i].TypeOID = d.OID()
+		data[i].Mode = d.int32()
 	}
 
 	return data
@@ -101,7 +105,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.FinalLSN = d.Lsn()
+		m.FinalLSN = d.LSN()
 		m.Timestamp = d.timestamp()
 		m.XID = d.int32()
 
@@ -113,8 +117,8 @@ func Parse(src []byte) (message.Message, error) {
 		copy(m.Raw, src)
 
 		m.Flags = d.uint8()
-		m.LSN = d.Lsn()
-		m.TransactionLSN = d.Lsn()
+		m.LSN = d.LSN()
+		m.TransactionLSN = d.LSN()
 		m.Timestamp = d.timestamp()
 
 		return m, nil
@@ -124,7 +128,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.LSN = d.Lsn()
+		m.LSN = d.LSN()
 		m.Name = d.string()
 
 		return m, nil
@@ -134,7 +138,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.OID = d.Oid()
+		m.OID = d.OID()
 		m.Namespace = d.string()
 		m.Name = d.string()
 		m.ReplicaIdentity = message.ReplicaIdentity(d.uint8())
@@ -147,7 +151,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.ID = d.Oid()
+		m.OID = d.OID()
 		m.Namespace = d.string()
 		m.Name = d.string()
 
@@ -158,7 +162,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.RelationOID = d.Oid()
+		m.RelationOID = d.OID()
 		m.IsNew = d.uint8() == 'N'
 		m.NewRow = d.tupledata()
 
@@ -169,7 +173,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.RelationOID = d.Oid()
+		m.RelationOID = d.OID()
 		m.IsKey = d.rowInfo('K')
 		m.IsOld = d.rowInfo('O')
 		if m.IsKey || m.IsOld {
@@ -185,7 +189,7 @@ func Parse(src []byte) (message.Message, error) {
 		}
 		copy(m.Raw, src)
 
-		m.RelationOID = d.Oid()
+		m.RelationOID = d.OID()
 		m.IsKey = d.rowInfo('K')
 		m.IsOld = d.rowInfo('O')
 		m.OldRow = d.tupledata()
@@ -196,7 +200,17 @@ func Parse(src []byte) (message.Message, error) {
 			Raw: make([]byte, len(src)),
 		}
 		copy(m.Raw, src)
-		//TODO
+
+		relationsCnt := int(d.uint32())
+		options := d.uint8()
+		m.Cascade = options&truncateCascadeBit == 1
+		m.RestartIdentity = options&truncateRestartIdentityBit == 1
+
+		m.RelationOIDs = make([]dbutils.OID, relationsCnt)
+		for i := 0; i < relationsCnt; i++ {
+			m.RelationOIDs[i] = dbutils.OID(d.uint32())
+		}
+
 		return m, nil
 	default:
 		return nil, fmt.Errorf("unknown message type for %s (%d)", []byte{msgType}, msgType)

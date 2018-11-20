@@ -78,8 +78,7 @@ type PrometheusExporterInterface interface {
 }
 
 func New(port int) *PrometheusExporter {
-	metrics := make(map[string]interface{})
-	return &PrometheusExporter{metrics: metrics, port: port}
+	return &PrometheusExporter{metrics: make(map[string]interface{}), port: port}
 }
 
 func (pe *PrometheusExporter) errorIfExists(name, typeName string) error {
@@ -211,7 +210,7 @@ func (pe *PrometheusExporter) SetToCurrentTime(name string, labelValues []string
 func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup, serverStopChan chan struct{}) {
 	defer wait.Done()
 
-	var srv *http.Server
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", pe.port)}
 
 	wait.Add(1)
 	go func() {
@@ -226,7 +225,6 @@ func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup, ser
 	// TODO: avoid exposting noisy metrics about the prometheus itself
 	http.Handle("/", http.RedirectHandler("/metrics", http.StatusMovedPermanently))
 	http.Handle("/metrics", promhttp.Handler())
-	srv = &http.Server{Addr: fmt.Sprintf(":%d", pe.port)}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("prometheus exporter routine closed with error %v", err)

@@ -104,7 +104,7 @@ func connInfoFromRows(rows *pgx.Rows, err error) (map[string]pgtype.OID, error) 
 func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation, error) {
 	var (
 		rel            message.Relation
-		relOid         dbutils.Oid
+		relOid         dbutils.OID
 		relRepIdentity pgtype.BPChar
 	)
 
@@ -143,7 +143,7 @@ func FetchRelationInfo(tx *pgx.Tx, tbl message.NamespacedName) (message.Relation
 		columns = append(columns, message.Column{
 			IsKey:         false,
 			Name:          name,
-			TypeOID:       dbutils.Oid(attType),
+			TypeOID:       dbutils.OID(attType),
 			Mode:          typMod,
 			FormattedType: formatType,
 		})

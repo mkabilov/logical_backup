@@ -15,7 +15,7 @@ const (
 
 type Config struct {
 	DB                                     pgx.ConnConfig `yaml:"db"`
-	Slotname                               string         `yaml:"slotname"`
+	SlotName                               string         `yaml:"slotname"`
 	PublicationName                        string         `yaml:"publication"`
 	TrackNewTables                         bool           `yaml:"trackNewTables"`
 	DeltasPerFile                          int            `yaml:"deltasPerFile"`

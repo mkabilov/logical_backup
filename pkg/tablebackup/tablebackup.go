@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx"
+	"gopkg.in/yaml.v2"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
@@ -25,16 +27,26 @@ import (
 
 const (
 	// TODO: move those constants somewhere else
-	DeltasDirName      = "deltas"
-	BasebackupFilename = "basebackup.copy"
-	TableInfoFilename  = "info.yaml"
+	DeltasDirName              = "deltas"
+	BasebackupFilename         = "basebackup.copy"
+	BaseBackupStateFileName    = "info.yaml"
+	BackupStateFileNamePattern = "backup_state_%d.yaml"
 
 	dirPerms                 = os.ModePerm
 	maxArchiverRetryTimeout  = 5 * time.Second
 	maxArchiverRetryAttempts = 3
 	archiverWorkerNapTime    = 500 * time.Millisecond
 	archiverCloseNapTime     = 1 * time.Minute
+	sleepBetweenBackups      = time.Second * 3
 )
+
+type tableBackupState struct {
+	DeltasSinceBackupCount   uint32    // trigger next backup based on the deltas
+	SegmentsSinceBackupCount uint32    // trigger next backup based on the segments
+	LastWrittenMessage       time.Time // trigger next backup based on time
+	LatestCommitLSN          string    // assign correct name to the next segment
+	LatestFlushLSN           string    // do not write anything before or equal this point
+}
 
 type TableBackuper interface {
 	TableBaseBackup
@@ -84,8 +96,9 @@ type TableBackup struct {
 	deltasSinceBackupCnt int
 	segmentStartLSN      dbutils.Lsn
 	// Data for LSNs below and including this one for a given table are guaranteed to be flushed.
-	flushLSN   dbutils.Lsn
-	currentLSN dbutils.Lsn
+	flushLSN        dbutils.Lsn
+	currentLSN      dbutils.Lsn
+	latestCommitLSN dbutils.Lsn // we need to store it on disk at shutdown to name the first segment after the restart.
 
 	segmentBufferMutex *sync.Mutex
 	segmentFilename    string
@@ -97,7 +110,6 @@ type TableBackup struct {
 	// Basebackup
 	firstDeltaLSNToKeep dbutils.Lsn
 	lastBasebackupTime  time.Time
-	sleepBetweenBackups time.Duration
 	lastBackupDuration  time.Duration
 	lastWrittenMessage  time.Time
 	basebackupIsPending bool
@@ -118,19 +130,18 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 	perTableContext, cancel := context.WithCancel(ctx)
 
 	tb := TableBackup{
-		NamespacedName:      tbl,
-		oid:                 oid,
-		ctx:                 perTableContext,
-		cancel:              cancel,
-		wait:                group,
-		sleepBetweenBackups: time.Second * 3,
-		cfg:                 cfg,
-		dbCfg:               dbCfg,
-		archiveDir:          path.Join(cfg.ArchiveDir, tableDir),
-		msgLen:              make([]byte, 8),
-		archiveFilesQueue:   queue.New(ctx),
-		segmentBufferMutex:  &sync.Mutex{},
-		prom:                prom,
+		NamespacedName:     tbl,
+		oid:                oid,
+		ctx:                perTableContext,
+		cancel:             cancel,
+		wait:               group,
+		cfg:                cfg,
+		dbCfg:              dbCfg,
+		archiveDir:         path.Join(cfg.ArchiveDir, tableDir),
+		msgLen:             make([]byte, 8),
+		archiveFilesQueue:  queue.New(ctx),
+		segmentBufferMutex: &sync.Mutex{},
+		prom:               prom,
 	}
 	if cfg.StagingDir != "" {
 		tb.stagingDir = path.Join(cfg.StagingDir, tableDir)
@@ -138,6 +149,11 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 
 	if err := tb.createDirs(); err != nil {
 		return nil, fmt.Errorf("could not create dirs: %v", err)
+	}
+
+	// Read our previous state if any
+	if err := tb.LoadState(); err != nil {
+		return nil, fmt.Errorf("could not load previous backup state from file: %v", err)
 	}
 
 	tb.basebackupQueue = basebackupsQueue
@@ -172,7 +188,11 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.Lsn, currentLSN d
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
 
-	// TODO: factor out switch into a separte routine.
+	if !currentLSN.IsValid() {
+		panic(fmt.Sprintf("Trying to write a message %v with InvalidLSN for table %s commitLSN %s", msg, t, commitLSN))
+	}
+
+	// TODO: factor out switch into a separate routine.
 	// should we switch to the new segment already?
 	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
 		if t.segmentFilename != "" {
@@ -197,6 +217,9 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.Lsn, currentLSN d
 	if err := t.appendDeltaToSegment(append(t.msgLen, msg...), currentLSN); err != nil {
 		log.Printf("could not append delta to the current segment buffer: %v", err)
 	}
+	// it's tempting to do this only during the segment switch, but that would give us a wrong
+	// LSN on restart if the segment we wrote just before the shutdown consisted of multiple transactions.
+	t.latestCommitLSN = commitLSN
 
 	return length, nil
 }
@@ -214,6 +237,10 @@ func (t *TableBackup) appendDeltaToSegment(currentDelta []byte, currentLSN dbuti
 	t.currentLSN = currentLSN
 
 	return err
+}
+
+func (t *TableBackup) getBackupStateFilename() string {
+	return fmt.Sprintf(BackupStateFileNamePattern, t.oid)
 }
 
 func (t *TableBackup) writeSegmentToFile() error {
@@ -245,7 +272,12 @@ func (t *TableBackup) writeSegmentToFile() error {
 	}
 	t.flushLSN = t.currentLSN
 	log.Printf("flushed current segment to disk file %s and set flush LSN to %s", deltaFilepath, t.flushLSN)
+
+	if err = t.StoreState(); err != nil {
+		return fmt.Errorf("could not write table backup state to file: %v", err)
+	}
 	t.queueArchiveFile(path.Join(DeltasDirName, t.segmentFilename))
+	t.queueArchiveFile(path.Join(DeltasDirName, t.getBackupStateFilename()))
 
 	return err
 }
@@ -400,7 +432,7 @@ func (t *TableBackup) archiveCurrentSegment(reason string) error {
 }
 
 // if we should archive the active non-empty delta due to the lack of activity on the table for a certain amount of time
-// TODO: make sure we don't have empty delta files opened in the first place and remove lastWrittenMessage.IsZero check.
+// TODO: make sure we don't have empty delta files opened in the first place and remove LastWrittenMessage.IsZero check.
 func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
 	return !t.isCurrentSegmentEmpty() &&
 		!t.lastWrittenMessage.IsZero() &&
@@ -426,7 +458,7 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 		// if we fail, it is not an issue, since we have both basebackup and info file in the staging directory.
 		// TODO: make sure we properly archive the leftovers of.copy and info file on restart
 		if basename := path.Base(destFile); basename == BasebackupFilename ||
-			basename == TableInfoFilename ||
+			basename == BaseBackupStateFileName ||
 			st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
@@ -521,7 +553,7 @@ func (t *TableBackup) hasRows() (bool, error) {
 }
 
 func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
-	if name == BasebackupFilename || name == TableInfoFilename {
+	if name == BasebackupFilename || name == BaseBackupStateFileName || name == t.getBackupStateFilename() {
 		return false, name
 	}
 	dir, file := path.Split(name)
@@ -610,4 +642,80 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 	}
 
 	return nBytes, nil
+}
+
+// StoreState writes state variables that helps decide on base backups and writing of new deltas
+func (t *TableBackup) StoreState() error {
+	tableDirectory := t.getDirectory()
+	backupStateFileName := t.getBackupStateFilename()
+	fp, err := ioutil.TempFile(tableDirectory, backupStateFileName)
+	if err != nil {
+		log.Printf("could not create temporary state file: %v", err)
+	}
+
+	// close the file before returning and remove it if any errors occurred (otherwsie, it should be renamed already)
+	defer func() {
+		fp.Close()
+		if err != nil {
+			if err := os.Remove(fp.Name()); err != nil {
+				log.Printf("could not remove a temporary state file %q: %v", fp.Name(), err)
+			}
+		}
+	}()
+
+	state := tableBackupState{
+		DeltasSinceBackupCount:   uint32(t.deltasSinceBackupCnt),
+		SegmentsSinceBackupCount: uint32(t.segmentsCnt),
+		LastWrittenMessage:       t.lastWrittenMessage,
+		LatestCommitLSN:          t.latestCommitLSN.String(),
+		LatestFlushLSN:           t.flushLSN.String(),
+	}
+
+	if err = yaml.NewEncoder(fp).Encode(state); err != nil {
+		return fmt.Errorf("could not encode backup state %#v: %v", state, err)
+	}
+	finalName := path.Join(tableDirectory, backupStateFileName)
+	if err := os.Rename(fp.Name(), finalName); err != nil {
+		return fmt.Errorf("could not rename temporary state file %q to %q: %v", fp.Name(), finalName)
+	}
+
+	return err
+}
+
+// LoadState reads the data written by the StoreState in the previous session
+func (t *TableBackup) LoadState() error {
+	var state tableBackupState
+	tableDirectory := t.getDirectory()
+	backupStateFileName := t.getBackupStateFilename()
+	stateFile := path.Join(tableDirectory, backupStateFileName)
+
+	// if the file doesn't exist, this is not an error
+	fp, err := os.Open(stateFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("could not open backup state file %q: %v", stateFile, err)
+		}
+		return nil
+	}
+
+	if err := yaml.NewDecoder(fp).Decode(&state); err != nil {
+		return fmt.Errorf("could not unmarshal yaml from file %q: %v", stateFile, err)
+	}
+
+	lsn, err := pgx.ParseLSN(state.LatestFlushLSN)
+	if err != nil {
+		return fmt.Errorf("could not parse latest flush LSN %s: %v", state.LatestFlushLSN, err)
+	}
+	t.flushLSN = dbutils.Lsn(lsn)
+	lsn, err = pgx.ParseLSN(state.LatestCommitLSN)
+	if err != nil {
+		return fmt.Errorf("could not parse latest commit LSN %s: %v", state.LatestCommitLSN, err)
+	}
+	t.latestCommitLSN = dbutils.Lsn(lsn)
+
+	t.lastWrittenMessage = state.LastWrittenMessage
+	t.segmentsCnt = int(state.SegmentsSinceBackupCount)
+	t.deltasSinceBackupCnt = int(state.DeltasSinceBackupCount)
+
+	return nil
 }

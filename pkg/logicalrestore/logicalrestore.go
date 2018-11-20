@@ -115,7 +115,7 @@ func (r *LogicalRestore) rollback() error {
 func (r *LogicalRestore) loadInfo() error {
 	var info message.DumpInfo
 
-	infoFilename := path.Join(r.baseDir, utils.TableDir(r.tblOid), tablebackup.TableInfoFilename)
+	infoFilename := path.Join(r.baseDir, utils.TableDir(r.tblOid), tablebackup.BaseBackupStateFileName)
 
 	fp, err := os.OpenFile(infoFilename, os.O_RDONLY, os.ModePerm)
 	if err != nil {

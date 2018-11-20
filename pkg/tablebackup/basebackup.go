@@ -51,7 +51,7 @@ func (t *TableBackup) RunBasebackup() error {
 		tableInfoDir = t.archiveDir
 	}
 
-	tempInfoFilepath := path.Join(tableInfoDir, TableInfoFilename+".new")
+	tempInfoFilepath := path.Join(tableInfoDir, BaseBackupStateFileName+".new")
 	if _, err := os.Stat(tempInfoFilepath); !os.IsNotExist(err) {
 		if err != nil {
 			return fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
@@ -70,7 +70,7 @@ func (t *TableBackup) RunBasebackup() error {
 		os.Remove(tempInfoFilepath)
 	}()
 
-	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= t.sleepBetweenBackups {
+	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= sleepBetweenBackups {
 		log.Printf("base backups happening too often; skipping")
 		return nil
 	}
@@ -158,7 +158,7 @@ func (t *TableBackup) RunBasebackup() error {
 		return fmt.Errorf("could not save info file: %v", err)
 	}
 
-	if err := os.Rename(tempInfoFilepath, path.Join(tableInfoDir, TableInfoFilename)); err != nil {
+	if err := os.Rename(tempInfoFilepath, path.Join(tableInfoDir, BaseBackupStateFileName)); err != nil {
 		log.Printf("could not rename: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func (t *TableBackup) RunBasebackup() error {
 	}
 
 	t.firstDeltaLSNToKeep = candidateLSN
-	t.queueArchiveFile(TableInfoFilename)
+	t.queueArchiveFile(BaseBackupStateFileName)
 
 	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
 		t.String(),
@@ -455,4 +455,11 @@ func (t *TableBackup) createTempReplicationSlot() (dbutils.Lsn, error) {
 	}
 
 	return lsn, nil
+}
+
+func (t *TableBackup) getDirectory() string {
+	if t.stagingDir != "" {
+		return t.stagingDir
+	}
+	return t.archiveDir
 }

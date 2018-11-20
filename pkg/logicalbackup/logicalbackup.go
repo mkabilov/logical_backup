@@ -246,7 +246,9 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		}
 		log.Printf("Created missing replication slot %q, consistent point %s", lb.cfg.Slotname, initialLSN)
 
-		lb.latestFlushLSN = initialLSN
+		// solve impedance mismatch between the flush LSN (the LSN we confirmed and flushed) and slot initial LSN
+		// (next, but not yet received LSN).
+		lb.latestFlushLSN = initialLSN - 1
 
 		if err := lb.writeRestartLSN(); err != nil {
 			log.Printf("could not store initial LSN: %v", err)
@@ -551,6 +553,14 @@ func (b *LogicalBackup) logicalDecoding() {
 
 			if repMsg.WalMessage != nil {
 				b.currentLSN = dbutils.Lsn(repMsg.WalMessage.WalStart)
+				// We may have flushed this LSN to all tables, but the slot's restart LSN did not advance
+				// and it is sent to us again after the restart of the backup tool. Skip it, unless it is a non-data
+				// message that doesn't have any LSN assigned.
+				if b.currentLSN != 0 && b.currentLSN <= b.latestFlushLSN {
+					log.Printf("received WAL message with LSN %s that is lower or equal to the flush LSN %s, skipping",
+						b.currentLSN, b.latestFlushLSN)
+					continue
+				}
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
 					log.Printf("invalid pgoutput message: %s", err)

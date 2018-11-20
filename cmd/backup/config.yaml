@@ -5,7 +5,7 @@ concurrentBasebackups: 5
 trackNewTables: true
 slotname: myslot
 publication: mypub
-initialBasebackup: true
+initialBasebackup: false
 fsync: true
 archiveDir: /tmp/final
 forceBasebackupAfterInactivityInterval: 24h

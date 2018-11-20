@@ -181,34 +181,24 @@ func (t *TableBackup) queueArchiveFile(filename string) {
 	}
 }
 
-// WriteDelta writes the delta into the current table segment. It is responsible for triggering the switch to the
-// new segment once the current one receives more than DeltasPerFile changes. For that sake, we pass a currentLSN
-// to it, so that it will set a flushLSN to it once the segment is switched and flushed.
+// WriteDelta writes the delta into the current table segment. It is an entry point for writes of a TableBackup class.
 func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN dbutils.LSN) (uint64, error) {
 	t.segmentBufferMutex.Lock()
 	defer t.segmentBufferMutex.Unlock()
 
 	if !currentLSN.IsValid() {
-		panic(fmt.Sprintf("Trying to write a message %v with InvalidLSN for table %s commitLSN %s", msg, t, commitLSN))
+		panic(fmt.Sprintf("trying to write a message %v with InvalidLSN for table %s commitLSN %s", msg, t, commitLSN))
 	}
 
-	// TODO: factor out switch into a separate routine.
-	// should we switch to the new segment already?
-	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
-		if t.segmentFilename != "" {
-			// flush current buffer to the delta filename and archive it.
-			if err := t.writeSegmentToFile(); err != nil {
-				return 0, fmt.Errorf("could not save current message; %v", err)
-			}
-		}
-		// TODO: why use commitLSN and not a current one?
-		t.startNewSegment(commitLSN)
+	// check if we have already flushed past this message to disk
+	if currentLSN <= t.flushLSN {
+		log.Printf("skip write for a delta with LSN %s below flush LSN %s for the table", currentLSN, t.flushLSN)
+		return 0, nil
 	}
 
-	if t.segmentsCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
-		log.Printf("queueing base backup because we reached backupDeltaThreshold %s", t)
-		t.SetBasebackupPending()
-		t.basebackupQueue.Put(t)
+	// TODO: use currentLSN instead of a commit one
+	if err := t.maybeStartNewSegment(commitLSN); err != nil {
+		return 0, err
 	}
 
 	length := uint64(len(msg) + 8)
@@ -222,6 +212,27 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN d
 	t.latestCommitLSN = commitLSN
 
 	return length, nil
+}
+
+// maybeStartNewSegment is responsible for triggering the switch to the new segment once the current one receives more
+// than DeltasPerFile changes.
+func (t *TableBackup) maybeStartNewSegment(segmentLSN dbutils.LSN) error {
+	if t.deltaCnt >= t.cfg.DeltasPerFile || t.segmentFilename == "" {
+		if t.segmentFilename != "" {
+			// flush current buffer to the delta filename and archive it.
+			if err := t.writeSegmentToFile(); err != nil {
+				return fmt.Errorf("could not save current message; %v", err)
+			}
+		}
+		t.startNewSegment(segmentLSN)
+	}
+	if t.segmentsCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
+		log.Printf("queueing base backup for table %s because we reached backupThreshold segments", t)
+		t.SetBasebackupPending()
+		t.basebackupQueue.Put(t)
+	}
+
+	return nil
 }
 
 func (t *TableBackup) appendDeltaToSegment(currentDelta []byte, currentLSN dbutils.LSN) error {
@@ -243,6 +254,8 @@ func (t *TableBackup) getBackupStateFilename() string {
 	return fmt.Sprintf(BackupStateFileNamePattern, t.oid)
 }
 
+// writeSegentToFile flushes the in-memory buffer to a segment file. The current LSN of the latest written segment is
+// taken as a flushLSN after the segment file has been fsynced.
 func (t *TableBackup) writeSegmentToFile() error {
 	var baseDir string
 

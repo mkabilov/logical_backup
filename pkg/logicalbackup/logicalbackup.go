@@ -180,11 +180,11 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		return nil, err
 	}
 
-	if err := lb.prepareDB(); err != nil {
+	if err := lb.initReplConn(); err != nil {
 		return nil, err
 	}
 
-	if err := lb.initReplConn(); err != nil {
+	if err := lb.prepareDB(); err != nil {
 		return nil, err
 	}
 
@@ -541,7 +541,7 @@ func (b *LogicalBackup) logicalDecoding() {
 				// We may have flushed this LSN to all tables, but the slot's restart LSN did not advance
 				// and it is sent to us again after the restart of the backup tool. Skip it, unless it is a non-data
 				// message that doesn't have any LSN assigned.
-				if walStart != dbutils.InvalidLSN && b.currentLSN <= b.latestFlushLSN {
+				if walStart.IsValid() && walStart <= b.latestFlushLSN {
 					log.Printf("received WAL message with LSN %s that is lower or equal to the flush LSN %s, skipping",
 						b.currentLSN, b.latestFlushLSN)
 					continue

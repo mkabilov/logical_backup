@@ -443,8 +443,8 @@ func (t *TableBackup) createTempRepSlot() (dbutils.SnapshotID, dbutils.LSN, time
 	)
 
 	startTime := time.Now()
-	row := t.replConn.QueryRow("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s EXPORT_SNAPSHOT",
-		t.tempSlotName(), dbutils.OutputPlugin)
+	row := t.replConn.QueryRow(fmt.Sprintf("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s EXPORT_SNAPSHOT",
+		t.tempSlotName(), dbutils.OutputPlugin))
 
 	if err := row.Scan(&slotName, &consistentPoint, &snapshotName, &outputPlugin); err != nil {
 		return snapshotName, lsn, duration, fmt.Errorf("could not scan: %v", err)

@@ -746,6 +746,7 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 			if err == tablebackup.ErrTableNotFound {
 				// Remove the table from the list of those to backup.
 				// Hold the mutex to protect against concurrent access in QueueBasebackupTables
+				log.Printf("table %v has been dropped, removing it from the backup", t)
 				t.Stop()
 				b.backupTables.Delete(t.ID())
 			} else if err != context.Canceled {

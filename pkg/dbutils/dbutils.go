@@ -11,12 +11,14 @@ import (
 	"github.com/jackc/pgx/pgtype"
 )
 
+type SnapshotID string
+
 type LSN uint64
 
 type OID uint32
 
 const (
-	outputPlugin    = "pgoutput"
+	OutputPlugin    = "pgoutput"
 	logicalSlotType = "logical"
 
 	InvalidOID OID = 0
@@ -150,7 +152,7 @@ func GetSlotFlushLSN(conn *pgx.Conn, slotName, dbName string) (LSN, error) {
 func CreateSlot(conn *pgx.Conn, ctx context.Context, slotName string) (LSN, error) {
 	var strLSN sql.NullString
 	row := conn.QueryRowEx(ctx, "select lsn from pg_create_logical_replication_slot($1, $2)",
-		nil, slotName, outputPlugin)
+		nil, slotName, OutputPlugin)
 
 	if err := row.Scan(&strLSN); err != nil {
 		return 0, fmt.Errorf("could not scan: %v", err)

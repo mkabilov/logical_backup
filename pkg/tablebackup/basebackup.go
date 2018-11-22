@@ -1,7 +1,6 @@
 package tablebackup
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -28,137 +27,76 @@ var (
 	ErrTableNotFound = errors.New("table not found")
 )
 
-// RunBaseBackup produces a 'snapshot' of the table (using COPY).
+// RunBasebackup produces a 'snapshot' of the table (using COPY).
 // It returns false if the table doesn't exist, otherwise true alongside the error if any
 func (t *TableBackup) RunBasebackup() error {
 	//TODO: split me into several methods
-
-	var (
-		backupLSN, preBackupLSN, postBackupLSN dbutils.LSN
-		tableInfoDir                           string
-	)
+	var backupLSN, preBackupLSN, postBackupLSN dbutils.LSN
 
 	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
-		log.Printf("Already locked %s; skipping", t)
+		log.Printf("Already locked %s; skipping", t) // info
 		return nil
 	}
 	defer atomic.StoreUint32(&t.locker, 0)
-	log.Printf("Starting base backup of %s", t)
-
-	if t.stagingDir != "" {
-		tableInfoDir = t.stagingDir
-	} else {
-		tableInfoDir = t.archiveDir
-	}
-
-	tempInfoFilepath := path.Join(tableInfoDir, BaseBackupStateFileName+".new")
-	if _, err := os.Stat(tempInfoFilepath); !os.IsNotExist(err) {
-		if err != nil {
-			return fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
-		}
-
-		os.Remove(tempInfoFilepath)
-	}
-
-	infoFp, err := os.OpenFile(tempInfoFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("could not create info file: %v", err)
-	}
-
-	defer func() {
-		infoFp.Close()
-		os.Remove(tempInfoFilepath)
-	}()
+	log.Printf("Starting base backup of %s", t) // info
 
 	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= sleepBetweenBackups {
-		log.Printf("base backups happening too often; skipping")
+		log.Printf("base backups happening too often; skipping") // info
 		return nil
 	}
 
-	if err := t.connect(); err != nil {
+	if err := t.replConnect(); err != nil {
 		return fmt.Errorf("could not connect: %v", err)
 	}
-	defer t.disconnect()
 
 	startTime := time.Now()
-	var relationInfo message.Relation
 
-	stop, err := func() (stop bool, err error) {
-		// do rollback if the code has thrown an error or simply found no rows, otherwise commit the changes.
-		// if the error happens during rollback or commit we either return it, if it is the first error in the
-		// transaction, or show it to the user if there was a prior one, to avoid masking that prior one.
-		if err := t.txBegin(); err != nil {
-			return true, fmt.Errorf("could not start transaction: %v", err)
-		}
+	snapshotID, backupLSN, repSlotDuration, err := t.createTempRepSlot() // uses repl connect
+	if err != nil {
+		t.replDisconnect()
+		return fmt.Errorf("could not get snapshot: %v", err)
+	}
+	log.Printf("It took %v to create replication slot", repSlotDuration) // debug
 
-		defer func() {
-			if stop || err != nil {
-				if err2 := t.txRollback(); err2 != nil {
-					log.Printf("could not rollback: %v", err2)
-					if err == nil {
-						err = err2
-					}
-				}
-			} else {
-				// in this case we also want to return this error
-				if cErr := t.txCommit(); cErr != nil {
-					stop = true
-					err = fmt.Errorf("could not commit: %v", cErr)
-				}
-			}
-		}()
-		preBackupLSN = t.segmentStartLSN
-		backupLSN, err = t.createTempReplicationSlot()
-		if err != nil { // slot will be dropped on tx finish
-			return true, fmt.Errorf("could not create replication slot: %v", err)
-		}
-		postBackupLSN = t.segmentStartLSN
+	postBackupLSN = t.segmentStartLSN
 
-		exists, err := t.lockTableAndCheckIfExists()
-		if !exists {
-			log.Printf("table %v has been dropped, removing it from the backup", t)
-			return true, ErrTableNotFound
-		}
-		if err != nil {
-			return true, fmt.Errorf("could not lock table: %v", err)
-		}
+	if err := t.connect(); err != nil {
+		t.replDisconnect()
+		return fmt.Errorf("could not connect: %v", err)
+	}
 
-		relationInfo, err = FetchRelationInfo(t.tx, t.NamespacedName)
-		if err != nil {
-			return true, fmt.Errorf("could not fetch table struct: %v", err)
-		}
+	if err := t.txBegin(snapshotID); err != nil {
+		t.replDisconnect()
+		return fmt.Errorf("could not begin tx: %v", err)
+	}
+	defer t.txRollback()
 
-		//TODO: check if table is empty before creating logical replication slot
-		if hasRows, err := t.hasRows(); err != nil {
-			return true, fmt.Errorf("could not check if table has rows: %v", err)
-		} else if !hasRows {
-			log.Printf("table %s seems to have no rows; skipping", t.NamespacedName)
-			return false, nil
-		}
+	if err := t.replDisconnect(); err != nil {
+		return fmt.Errorf("could not close replication connection: %v", err)
+	}
 
-		if err := t.copyDump(); err != nil {
-			return true, fmt.Errorf("could not dump table: %v", err)
-		}
-
-		return false, nil
-	}()
-	if stop {
+	if err := t.lockTable(); err == ErrTableNotFound {
 		return err
+	} else if err != nil {
+		return fmt.Errorf("could not lock table: %v", err)
+	}
+
+	//TODO: check if table is empty before creating logical replication slot
+	if hasRows, err := t.hasRows(); err != nil {
+		return fmt.Errorf("could not check if table has rows: %v", err)
+	} else if !hasRows {
+		log.Printf("table %s seems to have no rows; skipping", t.NamespacedName)
+		return nil
+	}
+
+	if err := t.copyDump(); err != nil {
+		return fmt.Errorf("could not dump table: %v", err)
 	}
 
 	t.lastBackupDuration = time.Since(startTime)
-	err = yaml.NewEncoder(infoFp).Encode(message.DumpInfo{
-		StartLSN:       backupLSN.String(),
-		CreateDate:     time.Now(),
-		Relation:       relationInfo,
-		BackupDuration: t.lastBackupDuration.Seconds(),
-	})
-	if err != nil {
-		return fmt.Errorf("could not save info file: %v", err)
-	}
 
-	if err := os.Rename(tempInfoFilepath, path.Join(tableInfoDir, BaseBackupStateFileName)); err != nil {
-		log.Printf("could not rename: %v", err)
+	if err := t.StoreDumpInfo(backupLSN); err != nil {
+		return fmt.Errorf("could not save state: %v", err)
 	}
 
 	// remove all deltas before this point, but keep the latest delta started before the backup, because it may
@@ -175,8 +113,8 @@ func (t *TableBackup) RunBasebackup() error {
 			postBackupLSN, backupLSN, preBackupLSN)
 		// looks like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
-			log.Panic("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
-				t, backupLSN, t.firstDeltaLSNToKeep)
+			log.Panic(fmt.Sprintf("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
+				t, backupLSN, t.firstDeltaLSNToKeep))
 		}
 		candidateLSN = preBackupLSN
 	}
@@ -210,7 +148,9 @@ func (t *TableBackup) RunBasebackup() error {
 	t.lastBasebackupTime = time.Now()
 	t.deltasSinceBackupCnt = 0
 
-	t.updateMetricsAfterBaseBackup()
+	if err := t.updateMetricsAfterBaseBackup(); err != nil {
+		log.Printf("could not update metrics: %v", err)
+	}
 
 	return nil
 }
@@ -227,28 +167,74 @@ func (t *TableBackup) IsBasebackupPending() bool {
 	return t.basebackupIsPending
 }
 
-func (t *TableBackup) updateMetricsAfterBaseBackup() {
+func (t *TableBackup) StoreDumpInfo(backupLSN dbutils.LSN) error {
+	tableInfoDir := t.archiveDir
+	if t.stagingDir != "" {
+		tableInfoDir = t.stagingDir
+	}
+
+	relationInfo, err := FetchRelationInfo(t.tx, t.NamespacedName)
+	if err != nil {
+		return fmt.Errorf("could not fetch table struct: %v", err)
+	}
+
+	tempInfoFilepath := path.Join(tableInfoDir, BaseBackupStateFileName+".new")
+	if _, err := os.Stat(tempInfoFilepath); !os.IsNotExist(err) {
+		if err != nil {
+			return fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
+		}
+
+		os.Remove(tempInfoFilepath)
+	}
+
+	infoFp, err := os.OpenFile(tempInfoFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("could not open info file %q: %v", tempInfoFilepath, err)
+	}
+	defer func() {
+		infoFp.Close()
+		os.Remove(tempInfoFilepath)
+	}()
+
+	err = yaml.NewEncoder(infoFp).Encode(message.DumpInfo{
+		StartLSN:       backupLSN.String(),
+		CreateDate:     time.Now(),
+		Relation:       relationInfo,
+		BackupDuration: t.lastBackupDuration.Seconds(),
+	})
+	if err != nil {
+		return fmt.Errorf("could not save info file: %v", err)
+	}
+
+	if err := os.Rename(tempInfoFilepath, path.Join(tableInfoDir, BaseBackupStateFileName)); err != nil {
+		log.Printf("could not rename: %v", err)
+	}
+
+	return nil
+}
+
+func (t *TableBackup) updateMetricsAfterBaseBackup() error {
 	err := t.prom.Set(
 		promexporter.PerTableLastBackupEndTimestamp,
 		float64(t.lastBasebackupTime.Unix()), []string{t.ID().String(), t.TextID()})
 	if err != nil {
-		log.Printf("could not set %s: %v", promexporter.PerTableLastBackupEndTimestamp, err)
+		return fmt.Errorf("could not set %s: %v", promexporter.PerTableLastBackupEndTimestamp, err)
 	}
 
 	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
 	if err != nil {
-		log.Printf("could not reset %s: %v", promexporter.PerTableMessageSinceLastBackupGauge, err)
+		return fmt.Errorf("could not reset %s: %v", promexporter.PerTableMessageSinceLastBackupGauge, err)
 	}
+
+	return nil
 }
 
-// connects to the postgresql instance using replication protocol
 func (t *TableBackup) connect() error {
 	cfg := t.dbCfg.Merge(pgx.ConnConfig{
-		RuntimeParams:        map[string]string{"replication": "database"},
 		PreferSimpleProtocol: true,
 	})
-	conn, err := pgx.Connect(cfg)
 
+	conn, err := pgx.Connect(cfg)
 	if err != nil {
 		return fmt.Errorf("could not connect: %v", err)
 	}
@@ -257,6 +243,7 @@ func (t *TableBackup) connect() error {
 	if err != nil {
 		return fmt.Errorf("could not fetch conn info: %v", err)
 	}
+
 	conn.ConnInfo = connInfo
 	t.conn = conn
 
@@ -271,8 +258,39 @@ func (t *TableBackup) disconnect() error {
 	return t.conn.Close()
 }
 
+// connects to the postgresql instance using replication protocol
+func (t *TableBackup) replConnect() error {
+	cfg := t.dbCfg.Merge(pgx.ConnConfig{
+		RuntimeParams:        map[string]string{"replication": "database"},
+		PreferSimpleProtocol: true,
+	})
+
+	replConn, err := pgx.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("could not connect: %v", err)
+	}
+
+	connInfo, err := initPostgresql(replConn)
+	if err != nil {
+		return fmt.Errorf("could not fetch conn info: %v", err)
+	}
+
+	replConn.ConnInfo = connInfo
+	t.replConn = replConn
+
+	return nil
+}
+
+func (t *TableBackup) replDisconnect() error {
+	if t.replConn == nil {
+		return fmt.Errorf("no open connections")
+	}
+
+	return t.replConn.Close()
+}
+
 func (t *TableBackup) tempSlotName() string {
-	return fmt.Sprintf("tempslot_%d", t.conn.PID())
+	return fmt.Sprintf("tempslot_%d", t.replConn.PID())
 }
 
 func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
@@ -298,26 +316,22 @@ func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
 	return nil
 }
 
-// lockTableAndCheckIfExists returns whether the table exists as the first return value by looking
-// at the error code of the message it gets when it cannot lock the table.
-func (t *TableBackup) lockTableAndCheckIfExists() (bool, error) {
-	tableExists := true
-
-	if _, err := t.tx.Exec(fmt.Sprintf("LOCK TABLE %s IN ACCESS SHARE MODE", t.NamespacedName.Sanitize())); err != nil {
+// lockTable tries to lock the table, if the table does not exist, an specific error will be returned
+func (t *TableBackup) lockTable() error {
+	sql := fmt.Sprintf("LOCK TABLE %s IN ACCESS SHARE MODE", t.NamespacedName.Sanitize())
+	if _, err := t.tx.Exec(sql); err != nil {
 		// check if the error comes from the server
-		switch e := err.(type) {
-		case pgx.PgError:
-			if e.Code == ErrCodeTableNotFound { // undefined_table
-				tableExists = false
-			}
+		if e, ok := err.(pgx.PgError); ok && e.Code == ErrCodeTableNotFound {
+			return ErrTableNotFound
 		}
-		return tableExists, err
+
+		return err
 	}
 
-	return tableExists, nil
+	return nil
 }
 
-func (t *TableBackup) txBegin() error {
+func (t *TableBackup) txBegin(snapshot dbutils.SnapshotID) error {
 	if t.tx != nil {
 		return fmt.Errorf("there is already a transaction in progress")
 	}
@@ -334,6 +348,10 @@ func (t *TableBackup) txBegin() error {
 	}
 
 	t.tx = tx
+
+	if _, err := t.tx.Exec(fmt.Sprintf("set transaction snapshot '%s'", snapshot)); err != nil {
+		return fmt.Errorf("could not set transaction snapshot")
+	}
 
 	return nil
 }
@@ -373,16 +391,13 @@ func (t *TableBackup) txRollback() error {
 }
 
 func (t *TableBackup) copyDump() error {
-	var dumpDir string
-
 	if t.tx == nil {
 		return fmt.Errorf("no running transaction")
 	}
 
+	dumpDir := t.archiveDir
 	if t.cfg.StagingDir != "" {
 		dumpDir = t.stagingDir
-	} else {
-		dumpDir = t.archiveDir
 	}
 
 	tempFilename := path.Join(dumpDir, BasebackupFilename+".new")
@@ -416,44 +431,30 @@ func (t *TableBackup) copyDump() error {
 	return nil
 }
 
-func (t *TableBackup) createTempReplicationSlot() (dbutils.LSN, error) {
-	var createdSlotName, basebackupLSN, snapshotName, plugin sql.NullString
+// createTempRepSlot creates temporary replication slot and exports it's snapshot and lsn
+func (t *TableBackup) createTempRepSlot() (dbutils.SnapshotID, dbutils.LSN, time.Duration, error) {
+	var (
+		slotName        string
+		consistentPoint string
+		outputPlugin    string
+		snapshotName    dbutils.SnapshotID
+		lsn             dbutils.LSN
+		duration        time.Duration
+	)
 
-	var lsn dbutils.LSN
+	startTime := time.Now()
+	row := t.replConn.QueryRow("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s EXPORT_SNAPSHOT",
+		t.tempSlotName(), dbutils.OutputPlugin)
 
-	if t.tx == nil {
-		return lsn, fmt.Errorf("no running transaction")
+	if err := row.Scan(&slotName, &consistentPoint, &snapshotName, &outputPlugin); err != nil {
+		return snapshotName, lsn, duration, fmt.Errorf("could not scan: %v", err)
 	}
 
-	// we don't need to accumulate WAL on the server throughout the whole COPY running time. We need the slot
-	// exclusively to figure out our transaction LSN, why not drop it once we have got it?
-
-	row := t.tx.QueryRow(fmt.Sprintf("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s USE_SNAPSHOT",
-		t.tempSlotName(), "pgoutput"))
-
-	if err := row.Scan(&createdSlotName, &basebackupLSN, &snapshotName, &plugin); err != nil {
-		return lsn, fmt.Errorf("could not scan: %v", err)
+	if err := lsn.Parse(consistentPoint); err != nil {
+		return snapshotName, lsn, duration, fmt.Errorf("could not parse lsn: %v", err)
 	}
 
-	defer func() {
-		if _, err := t.tx.Exec(fmt.Sprintf("DROP_REPLICATION_SLOT %s", t.tempSlotName())); err != nil {
-			log.Printf("could not drop replication slot %s right away: %v, it will be dropped at the end of the backup",
-				t.tempSlotName(), err)
-		}
-	}()
-
-	if !basebackupLSN.Valid {
-		return lsn, fmt.Errorf("null consistent point")
-	}
-
-	if err := lsn.Parse(basebackupLSN.String); err != nil {
-		return lsn, fmt.Errorf("could not parse LSN: %v", err)
-	}
-	if lsn == 0 {
-		return lsn, fmt.Errorf("no consistent starting point for a dump")
-	}
-
-	return lsn, nil
+	return snapshotName, lsn, time.Since(startTime), nil
 }
 
 func (t *TableBackup) getDirectory() string {

@@ -80,10 +80,11 @@ type TableBackup struct {
 	currentName message.NamespacedName
 
 	// Basebackup
-	tx    *pgx.Tx
-	conn  *pgx.Conn
-	cfg   *config.Config
-	dbCfg pgx.ConnConfig
+	tx       *pgx.Tx
+	conn     *pgx.Conn
+	replConn *pgx.Conn
+	cfg      *config.Config
+	dbCfg    pgx.ConnConfig
 
 	// Files
 	stagingDir string
@@ -533,7 +534,7 @@ func (t *TableBackup) setSegmentFilename(newLSN dbutils.LSN) {
 }
 
 func (t *TableBackup) String() string {
-	return t.NamespacedName.Sanitize()
+	return t.NamespacedName.String()
 }
 
 func (t *TableBackup) createDirs() error {

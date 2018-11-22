@@ -40,7 +40,9 @@ type DumpInfo struct {
 }
 
 type Message interface {
-	msg()
+	fmt.Stringer
+
+	MsgType() string
 }
 
 type DeltaMessage interface {
@@ -106,7 +108,8 @@ type Origin struct {
 }
 
 type Relation struct {
-	NamespacedName  `yaml:"NamespacedName"`
+	NamespacedName `yaml:"NamespacedName"`
+
 	Raw             []byte          `yaml:"-"`
 	OID             dbutils.OID     `yaml:"OID"`             // OID of the relation.
 	ReplicaIdentity ReplicaIdentity `yaml:"ReplicaIdentity"` // Replica identity
@@ -149,21 +152,183 @@ type Truncate struct {
 }
 
 type Type struct {
-	Raw       []byte
-	OID       dbutils.OID // OID of the data type
-	Namespace string      // Namespace (empty string for pg_catalog).
-	Name      string      // Name of the data type
+	NamespacedName
+
+	Raw []byte
+	OID dbutils.OID // OID of the data type
 }
 
-func (Begin) msg()    {}
-func (Relation) msg() {}
-func (Update) msg()   {}
-func (Insert) msg()   {}
-func (Delete) msg()   {}
-func (Commit) msg()   {}
-func (Origin) msg()   {}
-func (Type) msg()     {}
-func (Truncate) msg() {}
+func (Begin) MsgType() string    { return "begin" }
+func (Relation) MsgType() string { return "relation" }
+func (Update) MsgType() string   { return "update" }
+func (Insert) MsgType() string   { return "insert" }
+func (Delete) MsgType() string   { return "delete" }
+func (Commit) MsgType() string   { return "commit" }
+func (Origin) MsgType() string   { return "origin" }
+func (Type) MsgType() string     { return "type" }
+func (Truncate) MsgType() string { return "truncate" }
+
+func (t Tuple) String() string {
+	switch t.Kind {
+	case TextValue:
+		return dbutils.QuoteLiteral(string(t.Value))
+	case NullValue:
+		return "null"
+	case ToastedValue:
+		return "[toasted value]"
+	}
+
+	return "unknown"
+}
+
+func (m Begin) String() string {
+	return fmt.Sprintf("FinalLSN:%s Timestamp:%v XID:%d",
+		m.FinalLSN.String(), m.Timestamp.Format(time.RFC3339), m.XID)
+}
+
+func (m Relation) String() string {
+	parts := make([]string, 0)
+
+	parts = append(parts, fmt.Sprintf("OID:%s", m.OID))
+	parts = append(parts, fmt.Sprintf("Name:%s", m.NamespacedName))
+	parts = append(parts, fmt.Sprintf("RepIdentity:%s", m.ReplicaIdentity))
+
+	columns := make([]string, 0)
+	for _, c := range m.Columns {
+		var isKey, mode string
+
+		if c.IsKey {
+			isKey = " key"
+		}
+
+		if c.Mode != -1 {
+			mode = fmt.Sprintf("atttypmod:%v", c.Mode)
+		}
+		colStr := fmt.Sprintf("%q (type:%s)%s%s", c.Name, c.TypeOID, isKey, mode)
+		columns = append(columns, colStr)
+	}
+
+	parts = append(parts, fmt.Sprintf("Columns:[%s]", strings.Join(columns, ", ")))
+
+	return strings.Join(parts, " ")
+}
+
+func (m Update) String() string {
+	parts := make([]string, 0)
+	newValues := make([]string, 0)
+	oldValues := make([]string, 0)
+
+	parts = append(parts, fmt.Sprintf("relOID:%s", m.RelationOID))
+
+	if m.IsKey {
+		parts = append(parts, "key")
+	}
+	if m.IsOld {
+		parts = append(parts, "old")
+	}
+	if m.IsNew {
+		parts = append(parts, "new")
+	}
+
+	for _, r := range m.NewRow {
+		newValues = append(newValues, r.String())
+	}
+
+	for _, r := range m.OldRow {
+		oldValues = append(oldValues, r.String())
+	}
+
+	if len(newValues) > 0 {
+		parts = append(parts, fmt.Sprintf("newValues:[%s]", strings.Join(newValues, ", ")))
+	}
+
+	if len(oldValues) > 0 {
+		parts = append(parts, fmt.Sprintf("oldValues:[%s]", strings.Join(oldValues, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func (m Insert) String() string {
+	parts := make([]string, 0)
+	newValues := make([]string, 0)
+
+	parts = append(parts, fmt.Sprintf("relOID:%s", m.RelationOID))
+
+	if m.IsNew {
+		parts = append(parts, "new")
+	}
+
+	for _, r := range m.NewRow {
+		newValues = append(newValues, r.String())
+	}
+
+	if len(newValues) > 0 {
+		parts = append(parts, fmt.Sprintf("values:[%s]", strings.Join(newValues, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func (m Delete) String() string {
+	parts := make([]string, 0)
+	oldValues := make([]string, 0)
+
+	parts = append(parts, fmt.Sprintf("relOID:%s", m.RelationOID))
+
+	if m.IsKey {
+		parts = append(parts, "key")
+	}
+	if m.IsOld {
+		parts = append(parts, "old")
+	}
+
+	for _, r := range m.OldRow {
+		oldValues = append(oldValues, r.String())
+	}
+
+	if len(oldValues) > 0 {
+		parts = append(parts, fmt.Sprintf("oldValues:[%s]", strings.Join(oldValues, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func (m Commit) String() string {
+	return fmt.Sprintf("LSN:%s Timestamp:%v TxLSN:%s",
+		m.LSN, m.Timestamp.Format(time.RFC3339), m.TransactionLSN)
+}
+
+func (m Origin) String() string {
+	return fmt.Sprintf("LSN:%s Name:%s", m.LSN, m.Name)
+}
+
+func (m Type) String() string {
+	return fmt.Sprintf("OID:%s Name:%s", m.OID, m.NamespacedName)
+}
+
+func (m Truncate) String() string {
+	parts := make([]string, 0)
+	oids := make([]string, 0)
+
+	if m.Cascade {
+		parts = append(parts, "cascade")
+	}
+
+	if m.RestartIdentity {
+		parts = append(parts, "restart_identity")
+	}
+
+	for _, oid := range m.RelationOIDs {
+		oids = append(oids, oid.String())
+	}
+
+	if len(oids) > 0 {
+		parts = append(parts, fmt.Sprintf("tableOids:[%s]", strings.Join(oids, ", ")))
+	}
+
+	return strings.Join(parts, " ")
+}
 
 func (tr Truncate) SQL() string {
 	//TODO
@@ -378,6 +543,10 @@ func (t TupleKind) String() string {
 }
 
 func (n NamespacedName) String() string {
+	if n.Namespace == "public" {
+		return n.Name
+	}
+
 	return strings.Join([]string{n.Namespace, n.Name}, ".")
 }
 

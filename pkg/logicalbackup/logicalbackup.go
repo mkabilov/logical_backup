@@ -641,7 +641,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 				return fmt.Errorf("could not set replica identity to %s for table %s: %v", targetReplicaIdentity, fqtn, err)
 			}
 
-			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn)
+			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn) // debug
 		}
 
 		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, t.name, t.oid, b.dbCfg, b.basebackupQueue, b.prom)

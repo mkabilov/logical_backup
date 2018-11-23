@@ -31,7 +31,7 @@ var (
 // It returns false if the table doesn't exist, otherwise true alongside the error if any
 func (t *TableBackup) RunBasebackup() error {
 	//TODO: split me into several methods
-	var backupLSN, preBackupLSN, postBackupLSN dbutils.LSN
+	var snapshotLSN, preBackupLSN, postBackupLSN dbutils.LSN
 
 	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
 		log.Printf("Already locked %s; skipping", t) // info
@@ -51,7 +51,7 @@ func (t *TableBackup) RunBasebackup() error {
 
 	startTime := time.Now()
 
-	snapshotID, backupLSN, repSlotDuration, err := t.createTempRepSlot() // uses repl connect
+	snapshotID, snapshotLSN, repSlotDuration, err := t.createTempRepSlot() // uses repl connect
 	if err != nil {
 		t.replDisconnect()
 		return fmt.Errorf("could not get snapshot: %v", err)
@@ -95,7 +95,7 @@ func (t *TableBackup) RunBasebackup() error {
 
 	t.lastBackupDuration = time.Since(startTime)
 
-	if err := t.StoreDumpInfo(backupLSN); err != nil {
+	if err := t.StoreDumpInfo(snapshotLSN); err != nil {
 		return fmt.Errorf("could not save state: %v", err)
 	}
 
@@ -108,21 +108,21 @@ func (t *TableBackup) RunBasebackup() error {
 
 	candidateLSN := postBackupLSN
 
-	if candidateLSN > backupLSN {
+	if candidateLSN > snapshotLSN {
 		log.Printf("first delta lsn to keep %s is higher than the backup lsn %s, attempting the previous delta lsn %s",
-			postBackupLSN, backupLSN, preBackupLSN)
+			postBackupLSN, snapshotLSN, preBackupLSN)
 		// looks like the slot that has been created after the delta segment got an LSN that is lower than that segment!
-		if preBackupLSN > backupLSN {
+		if preBackupLSN > snapshotLSN {
 			log.Panic(fmt.Sprintf("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
-				t, backupLSN, t.firstDeltaLSNToKeep))
+				t, snapshotLSN, t.firstDeltaLSNToKeep))
 		}
 		candidateLSN = preBackupLSN
 	}
 
 	// Make sure we have a cutoff point
 	if candidateLSN == 0 {
-		log.Printf("first delta to keep lsn is not defined, reverting to the backup lsn %s", backupLSN)
-		candidateLSN = backupLSN
+		log.Printf("first delta to keep lsn is not defined, reverting to the backup lsn %s", snapshotLSN)
+		candidateLSN = snapshotLSN
 	}
 
 	t.firstDeltaLSNToKeep = candidateLSN
@@ -131,7 +131,7 @@ func (t *TableBackup) RunBasebackup() error {
 	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
 		t.String(),
 		t.lastBackupDuration.Truncate(1*time.Second),
-		backupLSN,
+		snapshotLSN,
 		t.firstDeltaLSNToKeep)
 
 	// note that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
@@ -431,7 +431,7 @@ func (t *TableBackup) copyDump() error {
 	return nil
 }
 
-// createTempRepSlot creates temporary replication slot and exports it's snapshot and lsn
+// createTempRepSlot creates temporary replication slot with EXPORT_SNAPSHOT keyword
 func (t *TableBackup) createTempRepSlot() (dbutils.SnapshotID, dbutils.LSN, time.Duration, error) {
 	var (
 		slotName        string

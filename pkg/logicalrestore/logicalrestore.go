@@ -222,6 +222,12 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 				return fmt.Errorf("could not begin transaction: %v", err)
 			}
 		case message.Commit:
+			if v.LSN < r.startLSN {
+				r.curLsn = dbutils.InvalidLSN
+				r.curTx = 0
+				break
+			}
+
 			if r.curLsn != dbutils.InvalidLSN && r.curLsn != v.LSN {
 				panic("final LSN does not match begin LSN")
 			}
@@ -395,6 +401,8 @@ func (r *LogicalRestore) Restore() error {
 	if err := r.loadInfo(); err != nil {
 		return fmt.Errorf("could not load dump info: %v", err)
 	}
+
+	log.Printf("applying deltas since %s LSN", r.startLSN)
 
 	if err := r.connect(); err != nil {
 		return fmt.Errorf("could not connect: %v", err)

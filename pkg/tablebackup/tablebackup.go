@@ -143,6 +143,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 		archiveFilesQueue:  queue.New(ctx),
 		segmentBufferMutex: &sync.Mutex{},
 		prom:               prom,
+		basebackupQueue:    basebackupsQueue,
 	}
 	if cfg.StagingDir != "" {
 		tb.stagingDir = path.Join(cfg.StagingDir, tableDir)
@@ -156,8 +157,6 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 	if err := tb.LoadState(); err != nil {
 		return nil, fmt.Errorf("could not load previous backup state from file: %v", err)
 	}
-
-	tb.basebackupQueue = basebackupsQueue
 
 	tb.wait.Add(2)
 	go tb.janitor()

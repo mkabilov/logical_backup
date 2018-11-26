@@ -13,5 +13,5 @@ prometheusPort: 19999
 db:
   host: 127.0.0.1
   port: 5432
-  database: lb_test1
+  database: lb_test_src
   user: postgres

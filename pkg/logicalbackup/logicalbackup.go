@@ -538,14 +538,7 @@ func (b *LogicalBackup) logicalDecoding() {
 
 			if repMsg.WalMessage != nil {
 				walStart := dbutils.LSN(repMsg.WalMessage.WalStart)
-				// We may have flushed this LSN to all tables, but the slot's restart LSN did not advance
-				// and it is sent to us again after the restart of the backup tool. Skip it, unless it is a non-data
-				// message that doesn't have any LSN assigned.
-				if walStart.IsValid() && walStart <= b.latestFlushLSN {
-					log.Printf("received WAL message with LSN %s that is lower or equal to the flush LSN %s, skipping",
-						b.currentLSN, b.latestFlushLSN)
-					continue
-				}
+
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
 					log.Printf("invalid pgoutput message: %s", err)

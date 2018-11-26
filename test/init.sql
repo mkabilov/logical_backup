@@ -1,20 +1,32 @@
-drop database if exists lb_test1;
-drop database if exists lb_test2;
+drop database if exists lb_test_src;
+drop database if exists lb_test_dst;
 
-create database lb_test1;
-create database lb_test2;
+create database lb_test_src;
+create database lb_test_dst;
 
-\c lb_test1
+\c lb_test_src
 create table test(
    id serial not null primary key,
    value integer not null,
    hash text not null
 );
 
-\c lb_test2
+create table test2(
+   id serial not null primary key,
+   value integer not null,
+   hash text not null
+);
+
+
+\c lb_test_dst
 create table test(
   id serial not null primary key,
   value integer not null,
   hash text not null
 );
 
+create table test2(
+  id serial not null primary key,
+  value integer not null,
+  hash text not null
+);

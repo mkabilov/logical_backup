@@ -229,7 +229,7 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			}
 
 			if r.curLsn != dbutils.InvalidLSN && r.curLsn != v.LSN {
-				panic("final LSN does not match begin LSN")
+				panic(fmt.Sprintf("final LSN(%s) does not match begin LSN(%s)", v.LSN, r.curLsn))
 			}
 
 			if err := r.commit(); err != nil {

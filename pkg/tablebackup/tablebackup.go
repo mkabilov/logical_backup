@@ -190,12 +190,6 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN d
 		panic(fmt.Sprintf("trying to write a message %v with InvalidLSN for table %s commitLSN %s", msg, t, commitLSN))
 	}
 
-	// check if we have already flushed past this message to disk
-	if currentLSN <= t.flushLSN {
-		log.Printf("skip write for a delta with LSN %s below flush LSN %s for the table", currentLSN, t.flushLSN)
-		return 0, nil
-	}
-
 	// TODO: use currentLSN instead of a commit one
 	if err := t.maybeStartNewSegment(commitLSN); err != nil {
 		return 0, err

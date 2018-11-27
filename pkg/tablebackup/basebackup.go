@@ -28,7 +28,7 @@ var (
 	ErrTableNotFound = errors.New("table not found")
 )
 
-// RunBaseBackup produces a 'snapshot' of the table (using COPY).
+// RunBasebackup produces a 'snapshot' of the table (using COPY).
 // It returns false if the table doesn't exist, otherwise true alongside the error if any
 func (t *TableBackup) RunBasebackup() error {
 	//TODO: split me into several methods
@@ -175,8 +175,9 @@ func (t *TableBackup) RunBasebackup() error {
 			postBackupLSN, backupLSN, preBackupLSN)
 		// looks like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
-			log.Panic("table %s: logical backup lsn %s points to an earlier location than the lsn of the latest delta created before it %s",
-				t, backupLSN, t.firstDeltaLSNToKeep)
+			log.Panic(fmt.Sprintf("table %s: logical backup lsn %s points to an earlier location than the lsn"+
+				" of the latest delta created before it %s",
+				t, backupLSN, t.firstDeltaLSNToKeep))
 		}
 		candidateLSN = preBackupLSN
 	}
@@ -202,7 +203,7 @@ func (t *TableBackup) RunBasebackup() error {
 			continue
 		}
 
-		if err := t.PurgeObsoleteDeltaFiles(path.Join(baseDir, DeltasDirName)); err != nil {
+		if err := t.purgeObsoleteDeltaFiles(path.Join(baseDir, DeltasDirName)); err != nil {
 			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(baseDir, DeltasDirName), err)
 		}
 	}
@@ -230,12 +231,12 @@ func (t *TableBackup) IsBasebackupPending() bool {
 func (t *TableBackup) updateMetricsAfterBaseBackup() {
 	err := t.prom.Set(
 		promexporter.PerTableLastBackupEndTimestamp,
-		float64(t.lastBasebackupTime.Unix()), []string{t.ID().String(), t.TextID()})
+		float64(t.lastBasebackupTime.Unix()), []string{t.OID().String(), t.TextID()})
 	if err != nil {
 		log.Printf("could not set %s: %v", promexporter.PerTableLastBackupEndTimestamp, err)
 	}
 
-	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.OID().String(), t.TextID()})
 	if err != nil {
 		log.Printf("could not reset %s: %v", promexporter.PerTableMessageSinceLastBackupGauge, err)
 	}
@@ -275,7 +276,7 @@ func (t *TableBackup) tempSlotName() string {
 	return fmt.Sprintf("tempslot_%d", t.conn.PID())
 }
 
-func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
+func (t *TableBackup) purgeObsoleteDeltaFiles(deltasDir string) error {
 	log.Printf("Purging segments in %s before the LSN %s", deltasDir, t.firstDeltaLSNToKeep)
 	fileList, err := ioutil.ReadDir(deltasDir)
 	if err != nil {
@@ -417,9 +418,11 @@ func (t *TableBackup) copyDump() error {
 }
 
 func (t *TableBackup) createTempReplicationSlot() (dbutils.LSN, error) {
-	var createdSlotName, basebackupLSN, snapshotName, plugin sql.NullString
+	var (
+		createdSlotName, basebackupLSN, snapshotName, plugin sql.NullString
 
-	var lsn dbutils.LSN
+		lsn dbutils.LSN
+	)
 
 	if t.tx == nil {
 		return lsn, fmt.Errorf("no running transaction")
@@ -427,9 +430,8 @@ func (t *TableBackup) createTempReplicationSlot() (dbutils.LSN, error) {
 
 	// we don't need to accumulate WAL on the server throughout the whole COPY running time. We need the slot
 	// exclusively to figure out our transaction LSN, why not drop it once we have got it?
-
 	row := t.tx.QueryRow(fmt.Sprintf("CREATE_REPLICATION_SLOT %s TEMPORARY LOGICAL %s USE_SNAPSHOT",
-		t.tempSlotName(), "pgoutput"))
+		t.tempSlotName(), dbutils.OutputPlugin))
 
 	if err := row.Scan(&createdSlotName, &basebackupLSN, &snapshotName, &plugin); err != nil {
 		return lsn, fmt.Errorf("could not scan: %v", err)

@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/signal"
 	"path"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx"
@@ -24,7 +26,7 @@ import (
 	"github.com/ikitiki/logical_backup/pkg/utils"
 )
 
-type cmdType int
+type msgType int
 
 const (
 	applicationName = "logical_backup"
@@ -36,13 +38,13 @@ const (
 	statusTimeout   = time.Second * 10
 	replWaitTimeout = time.Second * 10
 
-	cInsert cmdType = iota
-	cUpdate
-	cDelete
-	cBegin
-	cCommit
-	cRelation
-	cType
+	mInsert msgType = iota
+	mUpdate
+	mDelete
+	mBegin
+	mCommit
+	mRelation
+	mType
 )
 
 type NameAtLSN struct {
@@ -65,55 +67,10 @@ type LogicalBackuper interface {
 	Wait()
 }
 
-type BackupTables struct {
-	sync.RWMutex
-	data map[dbutils.OID]tablebackup.TableBackuper
-}
-
-func NewBackupTables() *BackupTables {
-	return &BackupTables{sync.RWMutex{}, make(map[dbutils.OID]tablebackup.TableBackuper)}
-}
-
-func (bt *BackupTables) GetIfExists(oid dbutils.OID) tablebackup.TableBackuper {
-	bt.RLock()
-	defer bt.RUnlock()
-
-	return bt.data[oid]
-}
-
-func (bt *BackupTables) Get(oid dbutils.OID) (result tablebackup.TableBackuper, ok bool) {
-	bt.RLock()
-	defer bt.RUnlock()
-
-	result, ok = bt.data[oid]
-	return
-}
-
-func (bt *BackupTables) Set(oid dbutils.OID, t tablebackup.TableBackuper) {
-	bt.Lock()
-	defer bt.Unlock()
-
-	bt.data[oid] = t
-}
-
-func (bt *BackupTables) Delete(oid dbutils.OID) {
-	bt.Lock()
-	defer bt.Unlock()
-
-	delete(bt.data, oid)
-}
-
-func (bt *BackupTables) Map(fn func(t tablebackup.TableBackuper)) {
-	bt.Lock()
-	defer bt.Unlock()
-
-	for _, t := range bt.data {
-		fn(t)
-	}
-}
-
 type LogicalBackup struct {
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	cfg *config.Config
 
 	pluginArgs []string
@@ -123,7 +80,7 @@ type LogicalBackup struct {
 	tableNameChanges oidToName
 
 	dbCfg    pgx.ConnConfig
-	replConn *pgx.ReplicationConn // connection for logical replication
+	replConn *pgx.ReplicationConn // replication connection for fetching deltas
 	tx       *pgx.Tx
 
 	currentLSN           dbutils.LSN // latest received LSN
@@ -134,12 +91,13 @@ type LogicalBackup struct {
 	basebackupQueue *queue.Queue
 	waitGr          *sync.WaitGroup
 	stopCh          chan struct{}
+	closeOnce       sync.Once
 
 	// TODO: should we get rid of those altogether given that we have prometheus?
-	msgCnt       map[cmdType]int
+	msgCnt       map[msgType]int
 	bytesWritten uint64
 
-	txBeginRelMsg    map[dbutils.OID]struct{}
+	txBeginRelMsg    map[dbutils.OID]struct{} // list of the relations with begin pending message
 	relationMessages map[dbutils.OID][]byte
 	beginMsg         []byte
 	typeMsg          []byte
@@ -148,18 +106,12 @@ type LogicalBackup struct {
 	prom prom.PrometheusExporterInterface
 }
 
-func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*LogicalBackup, error) {
-	mux := http.NewServeMux()
-
-	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
-	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
-	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
-	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
-	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
-
+func New(cfg *config.Config) (*LogicalBackup, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	lb := &LogicalBackup{
 		ctx:    ctx,
-		stopCh: stopCh,
+		cancel: cancel,
+		stopCh: make(chan struct{}),
 
 		backupTables:     NewBackupTables(),
 		relationMessages: make(map[dbutils.OID][]byte),
@@ -168,13 +120,11 @@ func New(ctx context.Context, stopCh chan struct{}, cfg *config.Config) (*Logica
 		basebackupQueue:  queue.New(ctx),
 		waitGr:           &sync.WaitGroup{},
 		cfg:              cfg,
-		msgCnt:           make(map[cmdType]int),
-		srv: http.Server{
-			Addr:    fmt.Sprintf(":%d", httpSrvPort),
-			Handler: http.TimeoutHandler(mux, httpSrvTimeout, ""),
-		},
-		prom: prom.New(cfg.PrometheusPort),
+		msgCnt:           make(map[msgType]int),
+		prom:             prom.New(cfg.PrometheusPort),
 	}
+
+	lb.initHttpSrv(httpSrvPort)
 
 	if err := createDirs(cfg.StagingDir, cfg.ArchiveDir); err != nil {
 		return nil, err
@@ -276,6 +226,21 @@ func (b *LogicalBackup) prepareDB() error {
 	return nil
 }
 
+func (b *LogicalBackup) initHttpSrv(port int) {
+	mux := http.NewServeMux()
+
+	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
+
+	b.srv = http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: http.TimeoutHandler(mux, httpSrvTimeout, ""),
+	}
+}
+
 func (b *LogicalBackup) initReplConn() error {
 	rc, err := pgx.ReplicationConnect(b.cfg.DB)
 	if err != nil {
@@ -294,7 +259,7 @@ func (b *LogicalBackup) baseDir() string {
 	return b.cfg.ArchiveDir
 }
 
-func (b *LogicalBackup) processDMLMessage(tableOID dbutils.OID, cmd cmdType, msg []byte) error {
+func (b *LogicalBackup) processDMLMessage(tableOID dbutils.OID, typ msgType, msg []byte) error {
 	bt, ok := b.backupTables.Get(tableOID)
 	if !ok {
 		log.Printf("table with OID %d is not tracked", tableOID)
@@ -306,43 +271,43 @@ func (b *LogicalBackup) processDMLMessage(tableOID dbutils.OID, cmd cmdType, msg
 	// the actual relation data to arrive and then write it here.
 	// TODO: avoid multiple writes
 	if _, ok := b.txBeginRelMsg[tableOID]; !ok {
-		if err := b.WriteCommandDataForTable(bt, b.beginMsg, cBegin); err != nil {
+		if err := b.WriteTableMessage(bt, mBegin, b.beginMsg); err != nil {
 			return err
 		}
-		b.txBeginRelMsg[bt.ID()] = struct{}{}
+		b.txBeginRelMsg[bt.OID()] = struct{}{}
 	}
 
 	if b.typeMsg != nil {
-		if err := b.WriteCommandDataForTable(bt, b.typeMsg, cType); err != nil {
+		if err := b.WriteTableMessage(bt, mType, b.typeMsg); err != nil {
 			return fmt.Errorf("could not write type message: %v", err)
 		}
 		b.typeMsg = nil
 	}
 
 	if relationMsg, ok := b.relationMessages[tableOID]; ok {
-		if err := b.WriteCommandDataForTable(bt, relationMsg, cRelation); err != nil {
+		if err := b.WriteTableMessage(bt, mRelation, relationMsg); err != nil {
 			return fmt.Errorf("could not write a relation message: %v", err)
 		}
 		delete(b.relationMessages, tableOID)
 	}
 
-	if err := b.WriteCommandDataForTable(bt, msg, cmd); err != nil {
+	if err := b.WriteTableMessage(bt, typ, msg); err != nil {
 		return fmt.Errorf("could not write message: %v", err)
 	}
 
 	return nil
 }
 
-func (b *LogicalBackup) WriteCommandDataForTable(t tablebackup.TableBackuper, msg []byte, cmd cmdType) error {
+func (b *LogicalBackup) WriteTableMessage(t tablebackup.TableBackuper, typ msgType, msg []byte) error {
 	ln, err := t.WriteDelta(msg, b.transactionCommitLSN, b.currentLSN)
 	if err != nil {
 		return err
 	}
 
 	b.bytesWritten += ln
-	b.msgCnt[cmd]++
+	b.msgCnt[typ]++
 
-	b.updateMetricsAfterWriteDelta(t, cmd, ln)
+	b.updateMetricsAfterWriteDelta(t, typ, ln)
 
 	return nil
 }
@@ -356,11 +321,11 @@ func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
 	case message.Relation:
 		err = b.processRelationMessage(v)
 	case message.Insert:
-		err = b.processDMLMessage(v.RelationOID, cInsert, v.Raw)
+		err = b.processDMLMessage(v.RelationOID, mInsert, v.Raw)
 	case message.Update:
-		err = b.processDMLMessage(v.RelationOID, cUpdate, v.Raw)
+		err = b.processDMLMessage(v.RelationOID, mUpdate, v.Raw)
 	case message.Delete:
-		err = b.processDMLMessage(v.RelationOID, cDelete, v.Raw)
+		err = b.processDMLMessage(v.RelationOID, mDelete, v.Raw)
 	case message.Begin:
 		b.lastTxId = v.XID
 		b.transactionCommitLSN = v.FinalLSN
@@ -373,7 +338,7 @@ func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
 		b.currentLSN = v.LSN
 		for relOID := range b.txBeginRelMsg {
 			tb := b.backupTables.GetIfExists(relOID)
-			if err = b.WriteCommandDataForTable(tb, v.Raw, cCommit); err != nil {
+			if err = b.WriteTableMessage(tb, mCommit, v.Raw); err != nil {
 				return err
 			}
 		}
@@ -428,10 +393,6 @@ func (b *LogicalBackup) getNextFlushLSN() dbutils.LSN {
 	return result
 }
 
-func printMessage(msg message.Message, currentLSN dbutils.LSN) {
-	log.Printf("received %T with LSN %s", msg, currentLSN)
-}
-
 // act on a new relation message. We act on table renames, drops and recreations and new tables
 func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 	if _, isRegistered := b.backupTables.Get(m.OID); !isRegistered {
@@ -470,9 +431,9 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 
 func (b *LogicalBackup) sendStatus() error {
 	log.Printf("sending new status with %s flush lsn (i:%d u:%d d:%d b:%0.2fMb) ",
-		b.latestFlushLSN, b.msgCnt[cInsert], b.msgCnt[cUpdate], b.msgCnt[cDelete], float64(b.bytesWritten)/1048576)
+		b.latestFlushLSN, b.msgCnt[mInsert], b.msgCnt[mUpdate], b.msgCnt[mDelete], float64(b.bytesWritten)/1048576)
 
-	b.msgCnt = make(map[cmdType]int)
+	b.msgCnt = make(map[msgType]int)
 	b.bytesWritten = 0
 
 	status, err := pgx.NewStandbyStatus(uint64(b.latestFlushLSN))
@@ -497,7 +458,7 @@ func (b *LogicalBackup) logicalDecoding() {
 	err := b.replConn.StartReplication(b.cfg.SlotName, uint64(b.latestFlushLSN), -1, b.pluginArgs...)
 	if err != nil {
 		log.Printf("failed to start replication: %s", err)
-		b.stopCh <- struct{}{}
+		b.Close()
 		return
 	}
 
@@ -510,7 +471,7 @@ func (b *LogicalBackup) logicalDecoding() {
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
 				log.Printf("could not send replay progress: %v", err)
-				b.stopCh <- struct{}{}
+				b.Close()
 				return
 			}
 		default:
@@ -527,7 +488,7 @@ func (b *LogicalBackup) logicalDecoding() {
 			// TODO: make sure we retry and cleanup after ourselves afterwards
 			if err != nil {
 				log.Printf("replication failed: %v", err)
-				b.stopCh <- struct{}{}
+				b.Close()
 				return
 			}
 
@@ -549,12 +510,13 @@ func (b *LogicalBackup) logicalDecoding() {
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
 					log.Printf("invalid pgoutput message: %s", err)
-					b.stopCh <- struct{}{}
+					b.Close()
 					return
 				}
+
 				if err := b.handler(logmsg, walStart); err != nil {
 					log.Printf("error handling waldata: %s", err)
-					b.stopCh <- struct{}{}
+					b.Close()
 					return
 				}
 			}
@@ -563,7 +525,7 @@ func (b *LogicalBackup) logicalDecoding() {
 				log.Println("server wants a reply")
 				if err := b.sendStatus(); err != nil {
 					log.Printf("could not send replay progress: %v", err)
-					b.stopCh <- struct{}{}
+					b.Close()
 					return
 				}
 			}
@@ -747,7 +709,7 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 				// Remove the table from the list of those to backup.
 				// Hold the mutex to protect against concurrent access in QueueBasebackupTables
 				t.Stop()
-				b.backupTables.Delete(t.ID())
+				b.backupTables.Delete(t.OID())
 			} else if err != context.Canceled {
 				log.Printf("could not basebackup %s: %v", t, err)
 			}
@@ -757,8 +719,9 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 	}
 }
 
-// TODO: make it a responsibility of periodicBackup on a table itself
 func (b *LogicalBackup) QueueBasebackupTables() {
+	// TODO: make it a responsibility of periodicBackup on a table itself
+
 	// need to hold the mutex here to prevent concurrent deletion of entries in the map.
 	b.backupTables.Map(func(t tablebackup.TableBackuper) {
 		b.basebackupQueue.Put(t)
@@ -766,7 +729,20 @@ func (b *LogicalBackup) QueueBasebackupTables() {
 	})
 }
 
-func (b *LogicalBackup) Run() {
+func (b *LogicalBackup) Close() error {
+	b.closeOnce.Do(func() {
+		close(b.stopCh)
+	})
+
+	return nil
+}
+
+func (b *LogicalBackup) Run() error {
+	if b.cfg.InitialBasebackup {
+		log.Printf("Queueing tables for the initial backup")
+		b.QueueBasebackupTables()
+	}
+
 	b.waitGr.Add(1)
 	go b.logicalDecoding()
 
@@ -782,7 +758,7 @@ func (b *LogicalBackup) Run() {
 		if err := b.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("could not start http server %v", err)
 		}
-		b.stopCh <- struct{}{}
+		b.Close()
 		return
 	}()
 
@@ -800,7 +776,43 @@ func (b *LogicalBackup) Run() {
 	}()
 
 	b.waitGr.Add(1)
-	go b.prom.Run(b.ctx, b.waitGr, b.stopCh)
+	go b.prom.Run(b.ctx, b.waitGr)
+
+	b.WaitForShutdown()
+
+	b.cancel()
+	b.Wait()
+
+	return nil
+}
+
+func (b *LogicalBackup) WaitForShutdown() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
+
+loop:
+	for {
+		select {
+		case sig := <-sigs:
+			switch sig {
+			case syscall.SIGABRT:
+				fallthrough
+			case syscall.SIGINT:
+				fallthrough
+			case syscall.SIGQUIT:
+				fallthrough
+			case syscall.SIGTERM:
+				break loop
+			case syscall.SIGHUP:
+				//TODO: reload the config?
+			default:
+				log.Printf("unhandled signal: %v", sig)
+			}
+		case <-b.stopCh:
+			log.Printf("received termination request")
+			break loop
+		}
+	}
 }
 
 func (b *LogicalBackup) flushOidNameMap() error {
@@ -824,164 +836,4 @@ func (b *LogicalBackup) flushOidNameMap() error {
 	}
 
 	return err
-}
-
-func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.OID, name message.NamespacedName) {
-	var lastEntry NameAtLSN
-
-	if b.tableNameChanges.nameChangeHistory[oid] != nil {
-		lastEntry = b.tableNameChanges.nameChangeHistory[oid][len(b.tableNameChanges.nameChangeHistory[oid])-1]
-	}
-	if b.tableNameChanges.nameChangeHistory[oid] == nil || lastEntry.Name != name {
-		b.tableNameChanges.nameChangeHistory[oid] = append(b.tableNameChanges.nameChangeHistory[oid],
-			NameAtLSN{Name: name, Lsn: b.transactionCommitLSN})
-		b.tableNameChanges.isChanged = true
-
-		// inform the tableBackuper about the new name
-		b.backupTables.GetIfExists(oid).SetTextID(name)
-	}
-}
-
-func (lb *LogicalBackup) registerMetrics() error {
-	registerMetrics := []prom.MetricsToRegister{
-		{
-			prom.MessageCounter,
-			"total number of messages received",
-			[]string{prom.MessageTypeLabel},
-			prom.MetricsCounter,
-		},
-		{
-			prom.TotalBytesWrittenCounter,
-			"total bytes written",
-			nil,
-			prom.MetricsCounter,
-		},
-		{
-			prom.TransactionCounter,
-			"total number of transactions",
-			nil,
-			prom.MetricsCounter,
-		},
-		{
-			prom.FlushLSNCGauge,
-			"last LSN to flush",
-			nil,
-			prom.MetricsGauge,
-		},
-		{
-			prom.LastCommitTimestampGauge,
-			"last commit timestamp",
-			nil,
-			prom.MetricsGauge,
-		},
-		{
-			prom.LastWrittenMessageTimestampGauge,
-			"last written message timestamp",
-			nil,
-			prom.MetricsGauge,
-		},
-		{
-			prom.FilesArchivedCounter,
-			"total files archived",
-			nil,
-			prom.MetricsCounter,
-		},
-		{
-			prom.FilesArchivedTimeoutCounter,
-			"total number of files archived due to a timeout",
-			nil,
-			prom.MetricsCounter,
-		},
-		{
-			prom.PerTableMessageCounter,
-			"per table number of messages written",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel, prom.MessageTypeLabel},
-			prom.MetricsCounterVector,
-		},
-		{
-			prom.PerTableBytesCounter,
-			"per table number of bytes written",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel},
-			prom.MetricsCounterVector,
-		},
-		{
-			prom.PerTablesFilesArchivedCounter,
-			"per table number of segments archived",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel},
-			prom.MetricsCounterVector,
-		},
-		{
-			prom.PerTableFilesArchivedTimeoutCounter,
-			"per table number of segments archived due to a timeout",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel},
-			prom.MetricsCounterVector,
-		},
-		{
-			prom.PerTableLastCommitTimestampGauge,
-			"per table last commit message timestamp",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel},
-			prom.MetricsGaugeVector,
-		},
-		{
-			prom.PerTableLastBackupEndTimestamp,
-			"per table last backup end timestamp",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel},
-			prom.MetricsGaugeVector,
-		},
-		{
-			prom.PerTableMessageSinceLastBackupGauge,
-			"per table number of messages since the last basebackup",
-			[]string{prom.TableOIDLabel, prom.TableNameLabel},
-			prom.MetricsGaugeVector,
-		},
-	}
-	for _, m := range registerMetrics {
-		if err := lb.prom.RegisterMetricsItem(&m); err != nil {
-			return fmt.Errorf("could not register prometheus metrics: %v", err)
-		}
-	}
-
-	return nil
-}
-
-func (b *LogicalBackup) updateMetricsAfterWriteDelta(t tablebackup.TableBackuper, cmd cmdType, ln uint64) {
-	var promType string
-
-	switch cmd {
-	case cInsert:
-		promType = prom.MessageTypeInsert
-	case cUpdate:
-		promType = prom.MessageTypeUpdate
-	case cDelete:
-		promType = prom.MessageTypeDelete
-	case cBegin:
-		promType = prom.MessageTypeBegin
-	case cCommit:
-		promType = prom.MessageTypeCommit
-	case cRelation:
-		promType = prom.MessageTypeRelation
-	case cType:
-		promType = prom.MessageTypeTypeInfo
-	default:
-		promType = prom.MessageTypeUnknown
-	}
-
-	b.prom.Inc(prom.MessageCounter, []string{promType})
-	b.prom.Inc(prom.PerTableMessageCounter, []string{t.ID().String(), t.TextID(), promType})
-	b.prom.SetToCurrentTime(prom.LastWrittenMessageTimestampGauge, nil)
-
-	b.prom.Add(prom.TotalBytesWrittenCounter, float64(ln), nil)
-	b.prom.Add(prom.PerTableBytesCounter, float64(ln), []string{t.ID().String(), t.TextID()})
-	b.prom.Inc(prom.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
-}
-
-func (b *LogicalBackup) updateMetricsOnCommit(commitTimestamp int64) {
-	for relOID := range b.txBeginRelMsg {
-		tb := b.backupTables.GetIfExists(relOID)
-		b.prom.Set(prom.PerTableLastCommitTimestampGauge, float64(commitTimestamp), []string{tb.ID().String(), tb.TextID()})
-	}
-
-	b.prom.Inc(prom.TransactionCounter, nil)
-	b.prom.Set(prom.FlushLSNCGauge, float64(b.transactionCommitLSN), nil)
-	b.prom.Set(prom.LastCommitTimestampGauge, float64(commitTimestamp), nil)
 }

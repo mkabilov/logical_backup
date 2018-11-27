@@ -27,10 +27,10 @@ import (
 
 const (
 	// TODO: move those constants somewhere else
-	DeltasDirName              = "deltas"
-	BasebackupFilename         = "basebackup.copy"
-	BaseBackupStateFileName    = "info.yaml"
-	BackupStateFileNamePattern = "backup_state_%d.yaml"
+	DeltasDirName           = "deltas"
+	BasebackupFilename      = "basebackup.copy"
+	BaseBackupStateFileName = "info.yaml"
+	DeltasState             = "deltas_state.yaml"
 
 	dirPerms                 = os.ModePerm
 	maxArchiverRetryTimeout  = 5 * time.Second
@@ -41,11 +41,11 @@ const (
 )
 
 type tableBackupState struct {
-	DeltasSinceBackupCount   uint32    // trigger next backup based on the deltas
-	SegmentsSinceBackupCount uint32    // trigger next backup based on the segments
-	LastWrittenMessage       time.Time // trigger next backup based on time
-	LatestCommitLSN          string    // assign correct name to the next segment
-	LatestFlushLSN           string    // do not write anything before or equal this point
+	DeltasSinceBackupCount   uint32    `yaml:"DeltasSinceBackupCount"`   // trigger next backup based on the deltas
+	SegmentsSinceBackupCount uint32    `yaml:"SegmentsSinceBackupCount"` // trigger next backup based on the segments
+	LastWrittenMessage       time.Time `yaml:"LastWrittenMessage"`       // trigger next backup based on time
+	LatestCommitLSN          string    `yaml:"LatestCommitLSN"`          // assign correct name to the next segment
+	LatestFlushLSN           string    `yaml:"LatestFlushLSN"`           // do not write anything before or equal this point
 }
 
 type TableBackuper interface {
@@ -54,7 +54,7 @@ type TableBackuper interface {
 	WriteDelta([]byte, dbutils.LSN, dbutils.LSN) (uint64, error)
 	Files() int
 	String() string
-	ID() dbutils.OID
+	OID() dbutils.OID
 	TextID() string
 	SetTextID(name message.NamespacedName)
 	GetFlushLSN() (flushLSN dbutils.LSN, changedSinceLastFlush bool)
@@ -244,10 +244,6 @@ func (t *TableBackup) appendDeltaToSegment(currentDelta []byte, currentLSN dbuti
 	return err
 }
 
-func (t *TableBackup) getBackupStateFilename() string {
-	return fmt.Sprintf(BackupStateFileNamePattern, t.oid)
-}
-
 // writeSegentToFile flushes the in-memory buffer to a segment file. The current LSN of the latest written segment is
 // taken as a flushLSN after the segment file has been fsynced.
 func (t *TableBackup) writeSegmentToFile() error {
@@ -284,7 +280,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 		return fmt.Errorf("could not write table backup state to file: %v", err)
 	}
 	t.queueArchiveFile(path.Join(DeltasDirName, t.segmentFilename))
-	t.queueArchiveFile(path.Join(DeltasDirName, t.getBackupStateFilename()))
+	t.queueArchiveFile(path.Join(DeltasDirName, DeltasState))
 
 	return err
 }
@@ -364,7 +360,7 @@ func (t *TableBackup) archiver() {
 
 					lsn, err = utils.GetLSNFromDeltaFilename(filename)
 					if err != nil {
-						log.Printf("could not decode lsn from the file name %s: %v", filename)
+						log.Printf("could not decode lsn from the file name %s: %v", filename, err)
 					}
 				}
 
@@ -412,7 +408,7 @@ func (t *TableBackup) janitor() {
 				continue
 			}
 			if err := t.archiveCurrentSegment("timeout"); err != nil {
-				log.Printf("could not write changes to %s due to inactivity", t.segmentFilename, err)
+				log.Printf("could not write changes to %s due to inactivity: %v", t.segmentFilename, err)
 				continue
 			}
 
@@ -500,7 +496,7 @@ func (t *TableBackup) updateMetricsForArchiver(isTimeout bool) {
 	}
 
 	t.prom.Inc(filesCounter, nil)
-	t.prom.Inc(perTableFilesCounter, []string{t.ID().String(), t.TextID()})
+	t.prom.Inc(perTableFilesCounter, []string{t.OID().String(), t.TextID()})
 }
 
 func (t *TableBackup) Files() int {
@@ -560,7 +556,7 @@ func (t *TableBackup) hasRows() (bool, error) {
 }
 
 func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
-	if name == BasebackupFilename || name == BaseBackupStateFileName || name == t.getBackupStateFilename() {
+	if name == BasebackupFilename || name == BaseBackupStateFileName || name == DeltasState {
 		return false, name
 	}
 	dir, file := path.Split(name)
@@ -599,20 +595,20 @@ func (t *TableBackup) isDeltaFileName(name string) (bool, string) {
 }
 
 // TODO: consider providing a pair of values identifying the table for prometheus in a single function call
-func (tb *TableBackup) ID() dbutils.OID {
-	return tb.oid
+func (t *TableBackup) OID() dbutils.OID {
+	return t.oid
 }
 
-func (tb *TableBackup) TextID() string {
-	return tb.currentName.String()
+func (t *TableBackup) TextID() string {
+	return t.currentName.String()
 }
 
-func (tb *TableBackup) SetTextID(name message.NamespacedName) {
-	tb.currentName = name
+func (t *TableBackup) SetTextID(name message.NamespacedName) {
+	t.currentName = name
 }
 
-func (tb *TableBackup) GetFlushLSN() (lsn dbutils.LSN, changedSinceLastFlush bool) {
-	return tb.flushLSN, tb.flushLSN != tb.currentLSN
+func (t *TableBackup) GetFlushLSN() (lsn dbutils.LSN, changedSinceLastFlush bool) {
+	return t.flushLSN, tb.flushLSN != tb.currentLSN
 }
 
 func copyFile(src, dst string, fsync bool) (int64, error) {
@@ -654,8 +650,7 @@ func copyFile(src, dst string, fsync bool) (int64, error) {
 // StoreState writes state variables that helps decide on base backups and writing of new deltas
 func (t *TableBackup) StoreState() error {
 	tableDirectory := t.getDirectory()
-	backupStateFileName := t.getBackupStateFilename()
-	fp, err := ioutil.TempFile(tableDirectory, backupStateFileName)
+	fp, err := ioutil.TempFile(tableDirectory, DeltasState)
 	if err != nil {
 		log.Printf("could not create temporary state file: %v", err)
 	}
@@ -681,9 +676,9 @@ func (t *TableBackup) StoreState() error {
 	if err = yaml.NewEncoder(fp).Encode(state); err != nil {
 		return fmt.Errorf("could not encode backup state %#v: %v", state, err)
 	}
-	finalName := path.Join(tableDirectory, backupStateFileName)
+	finalName := path.Join(tableDirectory, DeltasState)
 	if err := os.Rename(fp.Name(), finalName); err != nil {
-		return fmt.Errorf("could not rename temporary state file %q to %q: %v", fp.Name(), finalName)
+		return fmt.Errorf("could not rename temporary state file %q to %q: %v", fp.Name(), finalName, err)
 	}
 
 	return err
@@ -693,8 +688,7 @@ func (t *TableBackup) StoreState() error {
 func (t *TableBackup) LoadState() error {
 	var state tableBackupState
 	tableDirectory := t.getDirectory()
-	backupStateFileName := t.getBackupStateFilename()
-	stateFile := path.Join(tableDirectory, backupStateFileName)
+	stateFile := path.Join(tableDirectory, DeltasState)
 
 	// if the file doesn't exist, this is not an error
 	fp, err := os.Open(stateFile)

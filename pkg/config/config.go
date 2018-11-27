@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 const (
-	DefaultPrometheusPort = 1999
+	defaultPrometheusPort = 1999
 )
 
 type Config struct {
@@ -42,12 +43,31 @@ func New(filename string) (*Config, error) {
 		return nil, fmt.Errorf("could not decode config file: %v", err)
 	}
 	// forcing backups with sub-minute inactivity period makes no sense.
-	cfg.ForceBasebackupAfterInactivityInterval = cfg.ForceBasebackupAfterInactivityInterval.Truncate(1 * time.Minute)
+	cfg.ForceBasebackupAfterInactivityInterval = cfg.ForceBasebackupAfterInactivityInterval.Truncate(time.Minute)
 
-	// pin Prometheus port to 19999 by default.
 	if cfg.PrometheusPort == 0 {
-		cfg.PrometheusPort = DefaultPrometheusPort
+		cfg.PrometheusPort = defaultPrometheusPort
 	}
 
 	return &cfg, nil
+}
+
+func (c Config) Print() {
+	if c.StagingDir != "" {
+		log.Printf("Staging directory: %q", c.StagingDir)
+	} else {
+		log.Printf("No staging directory. Writing directly to the archive dir")
+	}
+
+	log.Printf("Archive directory: %q", c.ArchiveDir)
+	log.Printf("BackupThreshold: %v", c.BackupThreshold)
+	log.Printf("DeltasPerFile: %v", c.DeltasPerFile)
+	log.Printf("DB connection string: %s@%s:%d/%s slot:%q publication:%q",
+		c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)
+	log.Printf("Backing up new tables: %t", c.TrackNewTables)
+	log.Printf("Fsync: %t", c.Fsync)
+	if c.ForceBasebackupAfterInactivityInterval > 0 {
+		log.Printf("Force new basebackup of a modified table after inactivity for: %v",
+			c.ForceBasebackupAfterInactivityInterval)
+	}
 }

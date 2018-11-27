@@ -6,9 +6,10 @@ function finish {
   fi
 }
 
-rm -rf /tmp/backup /tmp/restore /tmp/final
+  rm -rf /tmp/backup /tmp/restore /tmp/final
+}
 
-psql -c "create role postgres superuser login" -d postgres
+rm -rf /tmp/final
 
 psql -f init.sql -v ON_ERROR_STOP=1 -d postgres
 

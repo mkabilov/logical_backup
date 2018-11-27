@@ -74,7 +74,7 @@ type PrometheusExporterInterface interface {
 	Set(name string, value float64, labelValues []string) error
 	Reset(name string, labelValues []string) error
 	SetToCurrentTime(name string, labelValues []string) error
-	Run(ctx context.Context, wait *sync.WaitGroup, serverStopChan chan struct{})
+	Run(ctx context.Context, wait *sync.WaitGroup)
 }
 
 func New(port int) *PrometheusExporter {
@@ -207,7 +207,7 @@ func (pe *PrometheusExporter) SetToCurrentTime(name string, labelValues []string
 	return nil
 }
 
-func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup, serverStopChan chan struct{}) {
+func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup) {
 	defer wait.Done()
 
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", pe.port)}
@@ -229,5 +229,4 @@ func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup, ser
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("prometheus exporter routine closed with error %v", err)
 	}
-	serverStopChan <- struct{}{}
 }

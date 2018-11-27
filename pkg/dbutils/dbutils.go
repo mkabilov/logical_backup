@@ -11,11 +11,11 @@ import (
 	"github.com/jackc/pgx/pgtype"
 )
 
-type SnapshotID string
-
-type LSN uint64
-
-type OID uint32
+type (
+	SnapshotID string
+	LSN uint64
+	OID uint32
+)
 
 const (
 	OutputPlugin    = "pgoutput"

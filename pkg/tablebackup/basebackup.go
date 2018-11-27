@@ -140,7 +140,7 @@ func (t *TableBackup) RunBasebackup() error {
 			continue
 		}
 
-		if err := t.PurgeObsoleteDeltaFiles(path.Join(baseDir, DeltasDirName)); err != nil {
+		if err := t.purgeObsoleteDeltaFiles(path.Join(baseDir, DeltasDirName)); err != nil {
 			return fmt.Errorf("could not purge delta files from %q: %v", path.Join(baseDir, DeltasDirName), err)
 		}
 	}
@@ -216,12 +216,12 @@ func (t *TableBackup) StoreDumpInfo(backupLSN dbutils.LSN) error {
 func (t *TableBackup) updateMetricsAfterBaseBackup() error {
 	err := t.prom.Set(
 		promexporter.PerTableLastBackupEndTimestamp,
-		float64(t.lastBasebackupTime.Unix()), []string{t.ID().String(), t.TextID()})
+		float64(t.lastBasebackupTime.Unix()), []string{t.OID().String(), t.TextID()})
 	if err != nil {
 		return fmt.Errorf("could not set %s: %v", promexporter.PerTableLastBackupEndTimestamp, err)
 	}
 
-	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.ID().String(), t.TextID()})
+	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.OID().String(), t.TextID()})
 	if err != nil {
 		return fmt.Errorf("could not reset %s: %v", promexporter.PerTableMessageSinceLastBackupGauge, err)
 	}
@@ -293,7 +293,7 @@ func (t *TableBackup) tempSlotName() string {
 	return fmt.Sprintf("tempslot_%d", t.replConn.PID())
 }
 
-func (t *TableBackup) PurgeObsoleteDeltaFiles(deltasDir string) error {
+func (t *TableBackup) purgeObsoleteDeltaFiles(deltasDir string) error {
 	log.Printf("Purging segments in %s before the LSN %s", deltasDir, t.firstDeltaLSNToKeep)
 	fileList, err := ioutil.ReadDir(deltasDir)
 	if err != nil {

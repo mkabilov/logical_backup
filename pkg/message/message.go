@@ -554,11 +554,11 @@ func (n NamespacedName) Sanitize() string {
 	return pgx.Identifier{n.Namespace, n.Name}.Sanitize()
 }
 
-func (r Relation) Structure() string {
-	result := fmt.Sprintf("%s.%s (OID: %v)", r.Namespace, r.Name, r.OID)
+func (rel Relation) Structure() string {
+	result := fmt.Sprintf("%s (OID: %v)", rel.NamespacedName, rel.OID)
 
 	cols := make([]string, 0)
-	for _, c := range r.Columns {
+	for _, c := range rel.Columns {
 		cols = append(cols, fmt.Sprintf("%s(%s)", c.Name, c.FormattedType))
 	}
 

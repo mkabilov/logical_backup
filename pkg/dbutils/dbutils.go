@@ -13,8 +13,8 @@ import (
 
 type (
 	SnapshotID string
-	LSN uint64
-	OID uint32
+	LSN        uint64
+	OID        uint32
 )
 
 const (

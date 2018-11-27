@@ -608,7 +608,7 @@ func (t *TableBackup) SetTextID(name message.NamespacedName) {
 }
 
 func (t *TableBackup) GetFlushLSN() (lsn dbutils.LSN, changedSinceLastFlush bool) {
-	return t.flushLSN, tb.flushLSN != tb.currentLSN
+	return t.flushLSN, t.flushLSN != t.currentLSN
 }
 
 func copyFile(src, dst string, fsync bool) (int64, error) {

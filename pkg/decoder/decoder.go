@@ -67,9 +67,9 @@ func (d *decoder) tupledata() []message.Tuple {
 	for i := 0; i < size; i++ {
 		switch d.buf.Next(1)[0] {
 		case 'n':
-			data[i] = message.Tuple{Kind: message.NullValue, Value: []byte{}}
+			data[i] = message.Tuple{Kind: message.NullValue, Value: make([]byte, 0)}
 		case 'u':
-			data[i] = message.Tuple{Kind: message.ToastedValue, Value: []byte{}}
+			data[i] = message.Tuple{Kind: message.ToastedValue, Value: make([]byte, 0)}
 		case 't':
 			vsize := int(d.order.Uint32(d.buf.Next(4)))
 			data[i] = message.Tuple{Kind: message.TextValue, Value: d.buf.Next(vsize)}

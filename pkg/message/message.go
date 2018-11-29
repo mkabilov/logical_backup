@@ -446,9 +446,14 @@ func (rel Relation) SQL(oldRel Relation) string {
 		if col.Mode > 0 {
 			typMod = fmt.Sprintf("%d", col.Mode)
 		}
-		sqlCommands = append(sqlCommands,
-			fmt.Sprintf(`do $_$begin execute 'alter table %s add column %s ' || format_type(%d, %s); end$_$;`,
-				quotedTableName, pgx.Identifier{col.Name}.Sanitize(), col.TypeOID, typMod))
+		sqlCommands = append(
+			sqlCommands,
+			fmt.Sprintf(
+				`do $_$begin execute 'alter table %s add column %s ' || format_type(%d, %s); end$_$;`,
+				quotedTableName,
+				pgx.Identifier{col.Name}.Sanitize(),
+				col.TypeOID,
+				typMod))
 	}
 
 	for oldCol, newCol := range alteredColumns {
@@ -457,9 +462,14 @@ func (rel Relation) SQL(oldRel Relation) string {
 			typMod = fmt.Sprintf("%d", newCol.Mode)
 		}
 
-		sqlCommands = append(sqlCommands,
-			fmt.Sprintf(`do $_$begin execute 'alter table %s alter column %s type ' || format_type(%d, %s); end$_$;`,
-				quotedTableName, pgx.Identifier{oldCol.Name}.Sanitize(), newCol.TypeOID, typMod))
+		sqlCommands = append(
+			sqlCommands,
+			fmt.Sprintf(
+				`do $_$begin execute 'alter table %s alter column %s type ' || format_type(%d, %s); end$_$;`,
+				quotedTableName,
+				pgx.Identifier{oldCol.Name}.Sanitize(),
+				newCol.TypeOID,
+				typMod))
 	}
 
 	if oldRel.ReplicaIdentity != rel.ReplicaIdentity {

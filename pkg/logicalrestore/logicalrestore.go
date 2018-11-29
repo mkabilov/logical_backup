@@ -222,8 +222,14 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 				return fmt.Errorf("could not begin transaction: %v", err)
 			}
 		case message.Commit:
+			if v.LSN < r.startLSN {
+				r.curLsn = dbutils.InvalidLSN
+				r.curTx = 0
+				break
+			}
+
 			if r.curLsn != dbutils.InvalidLSN && r.curLsn != v.LSN {
-				panic("final LSN does not match begin LSN")
+				panic(fmt.Sprintf("final LSN(%s) does not match begin LSN(%s)", v.LSN, r.curLsn))
 			}
 
 			if err := r.commit(); err != nil {

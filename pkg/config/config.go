@@ -34,12 +34,13 @@ type Config struct {
 func New(filename string) (*Config, error) {
 	var cfg Config
 
-	configFp, err := os.Open(filename)
+	fp, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("could not open config file: %v", err)
 	}
+	defer fp.Close()
 
-	if err := yaml.NewDecoder(configFp).Decode(&cfg); err != nil {
+	if err := yaml.NewDecoder(fp).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("could not decode config file: %v", err)
 	}
 	// forcing backups with sub-minute inactivity period makes no sense.

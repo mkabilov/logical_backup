@@ -201,6 +201,8 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			return fmt.Errorf("could not parse message: %v", err)
 		}
 
+		printMessage(msg, r.curLsn)
+
 		switch v := msg.(type) {
 		case message.Relation:
 			r.relInfo = v
@@ -210,6 +212,7 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			}
 
 			if v.FinalLSN < r.startLSN {
+				log.Printf("reading transaction begin for commit LSN %s smaller than start LSN %s", v.FinalLSN, r.startLSN)
 				r.curLsn = dbutils.InvalidLSN
 				r.curTx = 0
 				break
@@ -263,6 +266,10 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 	}
 
 	return nil
+}
+
+func printMessage(msg message.Message, currentLSN dbutils.LSN) {
+	log.Printf("restored %T with LSN %s", msg, currentLSN)
 }
 
 func (r *LogicalRestore) execSQL(sql string) error {

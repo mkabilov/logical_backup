@@ -317,6 +317,8 @@ func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
 
 	b.currentLSN = walStart
 
+	printMessage(m, walStart)
+
 	switch v := m.(type) {
 	case message.Relation:
 		err = b.processRelationMessage(v)

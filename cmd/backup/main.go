@@ -9,11 +9,14 @@ import (
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
+
+	"go.uber.org/zap"
 )
 
 var (
 	configFile = flag.String("config", "config.yaml", "path to the config file")
 	version    = flag.Bool("version", false, "Print version information")
+	debug      = flag.Bool("debug", false, "Enable debug mode")
 
 	Version  string
 	Revision string
@@ -26,6 +29,10 @@ func buildInfo() string {
 }
 
 func main() {
+
+	global, _ := zap.NewDevelopment()
+	zap.ReplaceGlobals(global)
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s\n", buildInfo())
 		fmt.Fprintf(os.Stderr, "\nUsage:\n")
@@ -43,7 +50,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg, err := config.New(*configFile)
+	cfg, err := config.New(*configFile, *debug)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not load config file: %v", err)
 		os.Exit(1)

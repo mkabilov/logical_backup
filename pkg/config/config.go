@@ -29,9 +29,10 @@ type Config struct {
 	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
 	ArchiverTimeout                        time.Duration  `yaml:"archiverTimeout"`
 	PrometheusPort                         int            `yaml:"prometheusPort"`
+	Debug                                  bool           `yaml:"debug"`
 }
 
-func New(filename string) (*Config, error) {
+func New(filename string, debug bool) (*Config, error) {
 	var cfg Config
 
 	fp, err := os.Open(filename)
@@ -49,11 +50,15 @@ func New(filename string) (*Config, error) {
 	if cfg.PrometheusPort == 0 {
 		cfg.PrometheusPort = defaultPrometheusPort
 	}
+	if debug {
+		cfg.Debug = debug
+	}
 
 	return &cfg, nil
 }
 
 func (c Config) Print() {
+	log.Printf("Debug mode: %t", c.Debug)
 	if c.StagingDir != "" {
 		log.Printf("Staging directory: %q", c.StagingDir)
 	} else {

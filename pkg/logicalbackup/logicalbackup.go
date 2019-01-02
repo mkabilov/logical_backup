@@ -3,7 +3,7 @@ package logicalbackup
 import (
 	"context"
 	"fmt"
-	"log"
+	"go.uber.org/zap"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -71,6 +71,8 @@ type LogicalBackup struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	log *zap.SugaredLogger
+
 	cfg *config.Config
 
 	pluginArgs []string
@@ -124,6 +126,14 @@ func New(cfg *config.Config) (*LogicalBackup, error) {
 		prom:             prom.New(cfg.PrometheusPort),
 	}
 
+	if cfg.Debug {
+		if logger, err := zap.NewDevelopment(); err == nil {
+			lb.log = logger.Sugar().Named("logical backup")
+		} else {
+			return nil, fmt.Errorf("could not create backup logger: %v", err)
+		}
+	}
+
 	lb.initHttpSrv(httpSrvPort)
 
 	if err := createDirs(cfg.StagingDir, cfg.ArchiveDir); err != nil {
@@ -143,6 +153,10 @@ func New(cfg *config.Config) (*LogicalBackup, error) {
 	}
 
 	return lb, nil
+}
+
+func (b *LogicalBackup) logWithError(err error) *zap.SugaredLogger {
+	return b.log.With("error", err)
 }
 
 func createDirs(dirs ...string) error {
@@ -173,8 +187,7 @@ func (b *LogicalBackup) prepareDB() error {
 	}
 	defer conn.Close()
 
-	//TODO: switch to more sophisticated logger and display pid only if in debug mode
-	log.Printf("Pg backend session PID: %d", conn.PID())
+	b.log.Debugf("Pg backend session PID: %d", conn.PID())
 
 	if err := dbutils.CreateMissingPublication(conn, b.cfg.PublicationName); err != nil {
 		return err
@@ -189,20 +202,20 @@ func (b *LogicalBackup) prepareDB() error {
 	slotExists := b.latestFlushLSN.IsValid()
 	if !slotExists {
 		// TODO: this will discard all existing backup data, we should probably bail out if existing backup is there
-		log.Printf("Creating logical replication slot %s", b.cfg.SlotName)
+		b.log.Infof("Creating logical replication slot %s", b.cfg.SlotName)
 
 		initialLSN, err := dbutils.CreateSlot(conn, b.ctx, b.cfg.SlotName)
 		if err != nil {
 			return fmt.Errorf("could not create replication slot: %v", err)
 		}
-		log.Printf("Created missing replication slot %q, consistent point %s", b.cfg.SlotName, initialLSN)
+		b.log.Infof("Created missing replication slot %q, consistent point %s", b.cfg.SlotName, initialLSN)
 
 		// solve impedance mismatch between the flush LSN (the LSN we confirmed and flushed) and slot initial LSN
 		// (next, but not yet received LSN).
 		b.latestFlushLSN = initialLSN - 1
 
 		if err := b.writeRestartLSN(); err != nil {
-			log.Printf("could not store initial LSN: %v", err)
+			b.logWithError(err).Errorw("could not store initial LSN")
 		}
 	} else {
 		restartLSN, err := b.readRestartLSN()
@@ -212,9 +225,10 @@ func (b *LogicalBackup) prepareDB() error {
 		if restartLSN.IsValid() {
 			b.latestFlushLSN = restartLSN
 		}
-		// we may have flushed the final segment at shutdown without bothering to advance the slot LSN.
+		// nothing to call home about, we may have flushed the final segment at shutdown
+		// without bothering to advance the slot LSN.
 		if err := b.sendStatus(); err != nil {
-			log.Printf("could not send replay progress: %v", err)
+			b.logWithError(err).Errorf("could not send replay progress")
 		}
 	}
 
@@ -262,7 +276,7 @@ func (b *LogicalBackup) baseDir() string {
 func (b *LogicalBackup) processDMLMessage(tableOID dbutils.OID, typ msgType, msg []byte) error {
 	bt, ok := b.backupTables.Get(tableOID)
 	if !ok {
-		log.Printf("table with OID %d is not tracked", tableOID)
+		b.log.With("OID", tableOID).Warnf("table is not tracked")
 		return nil
 	}
 
@@ -317,8 +331,6 @@ func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
 
 	b.currentLSN = walStart
 
-	printMessage(m, walStart)
-
 	switch v := m.(type) {
 	case message.Relation:
 		err = b.processRelationMessage(v)
@@ -347,21 +359,21 @@ func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
 
 		// if there were any changes in the table names, flush the map file
 		if err := b.flushOidNameMap(); err != nil {
-			log.Printf("could not flush the oid to map file: %v", err)
+			b.logWithError(err).Errorf("could not flush the oid to map file")
 		}
 
 		candidateFlushLSN := b.getNextFlushLSN()
 
 		if candidateFlushLSN > b.latestFlushLSN {
 			b.latestFlushLSN = candidateFlushLSN
-			log.Printf("advanced flush LSN to %s", b.latestFlushLSN)
+			b.log.Infow("advanced flush LSN", "LSN", b.latestFlushLSN)
 
 			if err := b.writeRestartLSN(); err != nil {
-				log.Printf("could not store flush LSN: %v", err)
+				b.logWithError(err).Errorf("could not store flush LSN")
 			}
 
 			if err = b.sendStatus(); err != nil {
-				log.Printf("could not send replay progress: %v", err)
+				b.logWithError(err).Errorf("could not send replay progress")
 			}
 		}
 
@@ -415,8 +427,7 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 
 func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 	if !b.cfg.TrackNewTables {
-		log.Printf("skip the table with oid %d and name %v because we are configured not to track new tables",
-			m.OID, m.NamespacedName)
+		b.log.Infow("skip the table because we are configured not to track new tables", "oid", m.OID, "name", m.NamespacedName)
 		return false, nil
 	}
 
@@ -426,14 +437,14 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 	}
 
 	b.backupTables.Set(m.OID, tb)
-	log.Printf("registered new table with oid %d and name %s", m.OID, m.NamespacedName.Sanitize())
+	b.log.Infow("registered new table", "oid", m.OID, "name", m.NamespacedName.Sanitize())
 
 	return true, nil
 }
 
 func (b *LogicalBackup) sendStatus() error {
-	log.Printf("sending new status with %s flush lsn (i:%d u:%d d:%d b:%0.2fMb) ",
-		b.latestFlushLSN, b.msgCnt[mInsert], b.msgCnt[mUpdate], b.msgCnt[mDelete], float64(b.bytesWritten)/1048576)
+	b.log.With("LSN", b.latestFlushLSN).Debugf("sending new status (i:%d u:%d d:%d b:%0.2fMb) ",
+		b.msgCnt[mInsert], b.msgCnt[mUpdate], b.msgCnt[mDelete], float64(b.bytesWritten)/1048576)
 
 	b.msgCnt = make(map[msgType]int)
 	b.bytesWritten = 0
@@ -455,11 +466,11 @@ func (b *LogicalBackup) logicalDecoding() {
 	defer b.waitGr.Done()
 
 	// TODO: move out the initialization routines
-	log.Printf("Starting from %s lsn", b.latestFlushLSN)
+	b.log.Infof("Starting from %s lsn", b.latestFlushLSN)
 
 	err := b.replConn.StartReplication(b.cfg.SlotName, uint64(b.latestFlushLSN), -1, b.pluginArgs...)
 	if err != nil {
-		log.Printf("failed to start replication: %s", err)
+		b.logWithError(err).Error("failed to start replication")
 		b.Close()
 		return
 	}
@@ -472,7 +483,7 @@ func (b *LogicalBackup) logicalDecoding() {
 			return
 		case <-ticker.C:
 			if err := b.sendStatus(); err != nil {
-				log.Printf("could not send replay progress: %v", err)
+				b.logWithError(err).Error("could not send replay progress")
 				b.Close()
 				return
 			}
@@ -484,18 +495,18 @@ func (b *LogicalBackup) logicalDecoding() {
 				continue
 			}
 			if err == context.Canceled {
-				log.Printf("received shutdown request: replication terminated")
+				b.log.Warn("received shutdown request: replication terminated")
 				return
 			}
 			// TODO: make sure we retry and cleanup after ourselves afterwards
 			if err != nil {
-				log.Printf("replication failed: %v", err)
+				b.logWithError(err).Error("replication failed")
 				b.Close()
 				return
 			}
 
 			if repMsg == nil {
-				log.Printf("received null replication message")
+				b.log.Warn("received null replication message")
 				continue
 			}
 
@@ -505,28 +516,28 @@ func (b *LogicalBackup) logicalDecoding() {
 				// and it is sent to us again after the restart of the backup tool. Skip it, unless it is a non-data
 				// message that doesn't have any LSN assigned.
 				if walStart.IsValid() && walStart <= b.latestFlushLSN {
-					log.Printf("received WAL message with LSN %s that is lower or equal to the flush LSN %s, skipping",
-						b.currentLSN, b.latestFlushLSN)
+					b.log.With("LSN", b.currentLSN, "Flush LSN", b.latestFlushLSN).
+						Info("skip WAL message with LSN that is lower or equal to the flush LSN")
 					continue
 				}
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
 				if err != nil {
-					log.Printf("invalid pgoutput message: %s", err)
+					b.logWithError(err).Errorf("invalid pgoutput message")
 					b.Close()
 					return
 				}
 
 				if err := b.handler(logmsg, walStart); err != nil {
-					log.Printf("error handling waldata: %s", err)
+					b.logWithError(err).Errorf("error handling waldata")
 					b.Close()
 					return
 				}
 			}
 
 			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
-				log.Println("server wants a reply")
+				b.log.Infof("server wants a reply")
 				if err := b.sendStatus(); err != nil {
-					log.Printf("could not send replay progress: %v", err)
+					b.logWithError(err).Errorf("could not send replay progress")
 					b.Close()
 					return
 				}
@@ -605,7 +616,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 				return fmt.Errorf("could not set replica identity to %s for table %s: %v", targetReplicaIdentity, fqtn, err)
 			}
 
-			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn)
+			b.log.With("table", fqtn).Infof("set replica identity to %s", targetReplicaIdentity)
 		}
 
 		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, t.name, t.oid, b.dbCfg, b.basebackupQueue, b.prom)
@@ -621,7 +632,7 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	}
 	// flush the OID to name mapping
 	if err := b.flushOidNameMap(); err != nil {
-		log.Printf("could not flush oid name map: %v", err)
+		b.logWithError(err).Errorf("could not flush oid name map")
 	}
 
 	return nil
@@ -673,7 +684,7 @@ func (b *LogicalBackup) writeRestartLSN() error {
 		}
 
 		if err := utils.SyncFileAndDirectory(fp); err != nil {
-			log.Printf("could not sync file and dir: %v", err)
+			b.logWithError(err).Errorf("could not sync file and dir")
 		}
 	}
 
@@ -688,7 +699,7 @@ func (b *LogicalBackup) writeRestartLSN() error {
 	}
 
 	if err := utils.SyncFileAndDirectory(fpArchive); err != nil {
-		log.Printf("could not sync file and dir: %v", err)
+		b.logWithError(err).Errorf("could not sync file and dir")
 	}
 
 	return nil
@@ -697,15 +708,19 @@ func (b *LogicalBackup) writeRestartLSN() error {
 func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 	defer b.waitGr.Done()
 
+	baseBackupLog := func() *zap.SugaredLogger {
+		return b.log.Named(fmt.Sprintf("background base backuper %d", i))
+	}
+
 	for {
 		obj, err := b.basebackupQueue.Get()
 		if err == context.Canceled {
-			log.Printf("quiting background base backuper %d", i)
+			baseBackupLog().Warn("quiting")
 			return
 		}
 
 		t := obj.(tablebackup.TableBackuper)
-		log.Printf("background base backuper %d: backing up table %s", i, t)
+		baseBackupLog().With("table", t).Debugf("backing up table")
 		if err := t.RunBasebackup(); err != nil {
 			if err == tablebackup.ErrTableNotFound {
 				// Remove the table from the list of those to backup.
@@ -713,7 +728,7 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 				t.Stop()
 				b.backupTables.Delete(t.OID())
 			} else if err != context.Canceled {
-				log.Printf("could not basebackup %s: %v", t, err)
+				b.logWithError(err).With("table", t).Errorf("could not basebackup")
 			}
 		}
 		// from now on we can schedule new basebackups on that table
@@ -741,14 +756,14 @@ func (b *LogicalBackup) Close() error {
 
 func (b *LogicalBackup) Run() error {
 	if b.cfg.InitialBasebackup {
-		log.Printf("Queueing tables for the initial backup")
+		b.log.Infof("Queueing tables for the initial backup")
 		b.QueueBasebackupTables()
 	}
 
 	b.waitGr.Add(1)
 	go b.logicalDecoding()
 
-	log.Printf("Starting %d background backupers", b.cfg.ConcurrentBasebackups)
+	b.log.Debugf("Starting %d background backupers", b.cfg.ConcurrentBasebackups)
 	for i := 0; i < b.cfg.ConcurrentBasebackups; i++ {
 		b.waitGr.Add(1)
 		go b.BackgroundBasebackuper(i)
@@ -758,7 +773,7 @@ func (b *LogicalBackup) Run() error {
 	go func() {
 		defer b.waitGr.Done()
 		if err := b.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("could not start http server %v", err)
+			b.logWithError(err).Errorf("could not start http server")
 		}
 		b.Close()
 		return
@@ -771,10 +786,10 @@ func (b *LogicalBackup) Run() error {
 
 		<-b.ctx.Done()
 		if err := b.srv.Close(); err != nil {
-			log.Printf("could not close http server: %v", err)
+			b.logWithError(err).Errorf("could not close http server")
 		}
 
-		log.Printf("debug http server closed")
+		b.log.Infof("debug http server closed")
 	}()
 
 	b.waitGr.Add(1)
@@ -808,10 +823,10 @@ loop:
 			case syscall.SIGHUP:
 				//TODO: reload the config?
 			default:
-				log.Printf("unhandled signal: %v", sig)
+				b.log.With("signal", sig).Error("unhandled signal")
 			}
 		case <-b.stopCh:
-			log.Printf("received termination request")
+			b.log.Warn("received termination request")
 			break loop
 		}
 	}

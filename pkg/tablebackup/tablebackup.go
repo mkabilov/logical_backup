@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path"
 	"strings"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/ikitiki/logical_backup/pkg/config"
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
+	"github.com/ikitiki/logical_backup/pkg/logger"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/prometheus"
 	"github.com/ikitiki/logical_backup/pkg/queue"
@@ -74,6 +74,7 @@ type TableBackup struct {
 	ctx    context.Context
 	wait   *sync.WaitGroup
 	cancel context.CancelFunc
+	log    *logger.Log
 
 	// Table info
 	oid         dbutils.OID
@@ -123,10 +124,13 @@ type TableBackup struct {
 	prom              promexporter.PrometheusExporterInterface
 }
 
-func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl message.NamespacedName, oid dbutils.OID,
-	dbCfg pgx.ConnConfig, basebackupsQueue *queue.Queue, prom promexporter.PrometheusExporterInterface) (*TableBackup, error) {
-	tableDir := utils.TableDir(oid)
+func New(ctx context.Context, group *sync.WaitGroup,
+	cfg *config.Config, tbl message.NamespacedName,
+	oid dbutils.OID, dbCfg pgx.ConnConfig,
+	basebackupsQueue *queue.Queue, prom promexporter.PrometheusExporterInterface,
+	parentLogger *logger.Log) (*TableBackup, error) {
 
+	tableDir := utils.TableDir(oid)
 	perTableContext, cancel := context.WithCancel(ctx)
 
 	tb := TableBackup{
@@ -142,6 +146,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 		archiveFilesQueue:  queue.New(ctx),
 		segmentBufferMutex: &sync.Mutex{},
 		prom:               prom,
+		log:                logger.NewLoggerFrom(parentLogger, fmt.Sprintf("table backup for %s", tbl), "OID", oid),
 	}
 	if cfg.StagingDir != "" {
 		tb.stagingDir = path.Join(cfg.StagingDir, tableDir)
@@ -171,7 +176,7 @@ func New(ctx context.Context, group *sync.WaitGroup, cfg *config.Config, tbl mes
 }
 
 func (t *TableBackup) Stop() {
-	log.Printf("terminating processing of table %v", t)
+	t.log.Warnf("terminating")
 	t.cancel()
 }
 
@@ -187,12 +192,15 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN d
 	defer t.segmentBufferMutex.Unlock()
 
 	if !currentLSN.IsValid() {
-		panic(fmt.Sprintf("trying to write a message %v with InvalidLSN for table %s commitLSN %s", msg, t, commitLSN))
+		t.log.WithReplicationMessage(msg).WithLSN(dbutils.InvalidLSN).WithCustomNamedLSN("Commit LSN", commitLSN).
+			DPanic("asked to write a bogus message")
+		return 0, nil
 	}
 
 	// check if we have already flushed past this message to disk
 	if currentLSN <= t.flushLSN {
-		log.Printf("skip write for a delta with LSN %s below flush LSN %s for the table", currentLSN, t.flushLSN)
+		t.log.WithLSN(currentLSN).WithCustomNamedLSN("flush LSN", t.flushLSN).
+			Info("skip write of an already written delta with LSN preceeding the flushed one")
 		return 0, nil
 	}
 
@@ -205,7 +213,7 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN d
 	binary.BigEndian.PutUint64(t.msgLen, length)
 
 	if err := t.appendDeltaToSegment(append(t.msgLen, msg...), currentLSN); err != nil {
-		log.Printf("could not append delta to the current segment buffer: %v", err)
+		t.log.WithError(err).Error("could not append delta to the current segment buffer")
 	}
 	// it's tempting to do this only during the segment switch, but that would give us a wrong
 	// LSN on restart if the segment we wrote just before the shutdown consisted of multiple transactions.
@@ -227,7 +235,8 @@ func (t *TableBackup) maybeStartNewSegment(segmentLSN dbutils.LSN) error {
 		t.startNewSegment(segmentLSN)
 	}
 	if t.segmentsCnt%t.cfg.BackupThreshold == 0 && t.deltaCnt == 0 && !t.IsBasebackupPending() {
-		log.Printf("queueing base backup for table %s because we reached backupThreshold segments", t)
+		t.log.WithDetail("backupThreshold = %d", t.cfg.BackupThreshold).
+			Info("queueing base backup due to reaching backupThreshold segments")
 		t.SetBasebackupPending()
 		t.basebackupQueue.Put(t)
 	}
@@ -280,7 +289,7 @@ func (t *TableBackup) writeSegmentToFile() error {
 		}
 	}
 	t.flushLSN = t.currentLSN
-	log.Printf("flushed current segment to disk file %s and set flush LSN to %s", deltaFilepath, t.flushLSN)
+	t.log.WithCustomNamedLSN("Flush LSN", t.flushLSN).Debugf("flushed current segment to disk file %s", deltaFilepath)
 
 	if err = t.StoreState(); err != nil {
 		return fmt.Errorf("could not write table backup state to file: %v", err)
@@ -330,8 +339,8 @@ func (t *TableBackup) periodicBackup() {
 
 			// do we need to create a new backup?
 			if time.Since(t.lastWrittenMessage) > t.cfg.ForceBasebackupAfterInactivityInterval {
-				log.Printf("last write to the table %s happened %v ago, new backup is queued",
-					t, time.Since(t.lastWrittenMessage).Truncate(1*time.Second))
+				t.log.Infof("last write to the table happened %v ago, new backup is queued",
+					time.Since(t.lastWrittenMessage).Truncate(1*time.Second))
 				t.SetBasebackupPending()
 				t.basebackupQueue.Put(t)
 			}
@@ -366,25 +375,29 @@ func (t *TableBackup) archiver() {
 
 					lsn, err = utils.GetLSNFromDeltaFilename(filename)
 					if err != nil {
-						log.Printf("could not decode lsn from the file name %s: %v", filename, err)
+						t.log.WithError(err).Errorf("could not decode lsn from the file name %s", filename)
 					}
 				}
 
 				archiveAction := func() (bool, error) {
 					if lsn > 0 && lsn < t.firstDeltaLSNToKeep {
-						log.Printf("archiving of segment %s skipped, because the changes predate the latest basebackup lsn %s",
-							fname, t.firstDeltaLSNToKeep)
+						t.log.WithLSN(lsn).
+							WithCustomNamedLSN("Backup LSN", t.firstDeltaLSNToKeep).
+							WithFilename(fname).
+							Infof("archiving skipped, changes predate the latest basebackup")
 						// RunBasebackup() will take care of removing actual files from the temp directory
 						return false, nil
 					}
-					err := archiveOneFile(path.Join(t.stagingDir, fname), path.Join(t.archiveDir, fname), t.cfg.Fsync)
+					err := archiveOneFile(path.Join(t.stagingDir, fname),
+						path.Join(t.archiveDir, fname),
+						t.cfg.Fsync, t.log)
 
 					return err != nil, err
 				}
 
 				err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
 				if err != nil {
-					log.Printf("could not archive %s: %v", fname, err)
+					t.log.WithError(err).Errorf("could not archive %s", fname)
 					continue
 				}
 
@@ -406,7 +419,8 @@ func (t *TableBackup) janitor() {
 			closeCall.Stop()
 
 			if err := t.archiveCurrentSegment("shutdown"); err != nil {
-				log.Printf("could not write active changes to on shutdown: %v", err)
+				t.log.WithError(err).WithFilename(t.segmentFilename).
+					Error("could not write changes to on shutdown")
 			}
 			return
 		case <-closeCall.C:
@@ -414,7 +428,8 @@ func (t *TableBackup) janitor() {
 				continue
 			}
 			if err := t.archiveCurrentSegment("timeout"); err != nil {
-				log.Printf("could not write changes to %s due to inactivity: %v", t.segmentFilename, err)
+				t.log.WithError(err).WithFilename(t.segmentFilename).
+					Errorf("could not write changes after inactivity timeout")
 				continue
 			}
 
@@ -431,7 +446,7 @@ func (t *TableBackup) archiveCurrentSegment(reason string) error {
 		return nil
 	}
 
-	log.Printf("writing and archiving current segment to %s due to the %s", t.segmentFilename, reason)
+	t.log.WithFilename(t.segmentFilename).Debugf("writing and archiving current segment due to the %s", reason)
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
 	}
@@ -451,9 +466,9 @@ func (t *TableBackup) triggerArchiveTimeoutOnTable() bool {
 
 // archiveOneFile returns error only if the actual copy failed, so that we could retry it. In all other "unusual" cases
 // it just displays a cause and bails out.
-func archiveOneFile(sourceFile, destFile string, fsync bool) error {
+func archiveOneFile(sourceFile, destFile string, fsync bool, log *logger.Log) error {
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
-		log.Printf("source file doesn't exist: %q; skipping", sourceFile)
+		log.WithFilename(sourceFile).Warn("couldn't archive: source file doesn't exist")
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("could not stat source file %q: %v", sourceFile, err)
@@ -471,7 +486,7 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 			st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
-			log.Printf("destination file is not empty %q; skipping", destFile)
+			log.WithFilename(destFile).Warnf("could not archive: destination file is not empty")
 			return nil
 		}
 	}
@@ -482,10 +497,10 @@ func archiveOneFile(sourceFile, destFile string, fsync bool) error {
 	}
 
 	if err := os.Remove(sourceFile); err != nil {
-		log.Printf("could not delete old file: %v", err)
+		log.WithError(err).Errorf("could not delete already archived file")
 	}
 
-	log.Printf("successfully archived %s", destFile)
+	log.WithFilename(destFile).Infof("successfully archived")
 
 	return nil
 }
@@ -658,7 +673,7 @@ func (t *TableBackup) StoreState() error {
 	tableDirectory := t.getDirectory()
 	fp, err := ioutil.TempFile(tableDirectory, DeltasState)
 	if err != nil {
-		log.Printf("could not create temporary state file: %v", err)
+		t.log.WithError(err).WithFilename(fp.Name()).Errorf("could not create temporary state file")
 	}
 
 	// close the file before returning and remove it if any errors occurred (otherwsie, it should be renamed already)
@@ -666,7 +681,7 @@ func (t *TableBackup) StoreState() error {
 		fp.Close()
 		if err != nil {
 			if err := os.Remove(fp.Name()); err != nil {
-				log.Printf("could not remove a temporary state file %q: %v", fp.Name(), err)
+				t.log.WithError(err).WithFilename(fp.Name()).Error("could not remove a temporary state file")
 			}
 		}
 	}()

@@ -126,12 +126,8 @@ func New(cfg *config.Config) (*LogicalBackup, error) {
 		prom:             prom.New(cfg.PrometheusPort),
 	}
 
-	if cfg.Debug {
-		if logger, err := zap.NewDevelopment(); err == nil {
-			lb.log = logger.Sugar().Named("logical backup")
-		} else {
-			return nil, fmt.Errorf("could not create backup logger: %v", err)
-		}
+	if err := lb.setupLogger(cfg.Debug); err != nil {
+		return nil, fmt.Errorf("could not create backup logger: %v", err)
 	}
 
 	lb.initHttpSrv(httpSrvPort)
@@ -153,6 +149,24 @@ func New(cfg *config.Config) (*LogicalBackup, error) {
 	}
 
 	return lb, nil
+}
+
+func (b *LogicalBackup) setupLogger(debug bool) error {
+	var (
+		logger *zap.Logger
+		err    error
+	)
+
+	if debug {
+		logger, err = zap.NewDevelopment()
+	} else {
+		logger, err = zap.NewProduction()
+	}
+	if err == nil {
+		b.log = logger.Sugar().Named("logical backup")
+	}
+
+	return err
 }
 
 func (b *LogicalBackup) logWithError(err error) *zap.SugaredLogger {

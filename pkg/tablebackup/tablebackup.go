@@ -178,6 +178,7 @@ func New(ctx context.Context, group *sync.WaitGroup,
 func (t *TableBackup) Stop() {
 	t.log.Warnf("terminating")
 	t.cancel()
+	t.log.Sync()
 }
 
 func (t *TableBackup) queueArchiveFile(filename string) {

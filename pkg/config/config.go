@@ -2,11 +2,11 @@ package config
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx"
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 )
 
@@ -58,22 +58,27 @@ func New(filename string, debug bool) (*Config, error) {
 }
 
 func (c Config) Print() {
-	log.Printf("Debug mode: %t", c.Debug)
-	if c.StagingDir != "" {
-		log.Printf("Staging directory: %q", c.StagingDir)
-	} else {
-		log.Printf("No staging directory. Writing directly to the archive dir")
+	ops := [][]string{
+		{"Staging directory", c.StagingDir},
+		{"Archive directory", c.ArchiveDir},
+		{"BackupThreshold", fmt.Sprintf("%d", c.BackupThreshold)},
+		{"DeltasPerFile", fmt.Sprintf("%d", c.DeltasPerFile)},
+		{"DB Connection String", fmt.Sprintf("%s@%s:%d/%s slot:%q publication:%q", c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)},
+		{"Track New Tables", fmt.Sprintf("%t", c.TrackNewTables)},
+		{"Fsync", fmt.Sprintf("%t", c.Fsync)},
+		{"Debug mode", fmt.Sprintf("%t", c.Debug)},
 	}
 
-	log.Printf("Archive directory: %q", c.ArchiveDir)
-	log.Printf("BackupThreshold: %v", c.BackupThreshold)
-	log.Printf("DeltasPerFile: %v", c.DeltasPerFile)
-	log.Printf("DB connection string: %s@%s:%d/%s slot:%q publication:%q",
-		c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)
-	log.Printf("Backing up new tables: %t", c.TrackNewTables)
-	log.Printf("Fsync: %t", c.Fsync)
-	if c.ForceBasebackupAfterInactivityInterval > 0 {
-		log.Printf("Force new basebackup of a modified table after inactivity for: %v",
-			c.ForceBasebackupAfterInactivityInterval)
+	if c.StagingDir == "" {
+		ops = ops[1:]
+		zap.S().Infof("No staging directory specified. Files will be written directly to the archive directory")
 	}
+	if c.ForceBasebackupAfterInactivityInterval > 0 {
+		ops = append(ops, []string{"Force new basebackup of a modified table after inactivity", fmt.Sprintf("%v", c.ForceBasebackupAfterInactivityInterval)})
+	}
+
+	for _, opt := range ops {
+		zap.S().With(opt[0], opt[1]).Info("option")
+	}
+
 }

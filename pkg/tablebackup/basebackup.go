@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"path"
 	"sync/atomic"
@@ -39,11 +38,11 @@ func (t *TableBackup) RunBasebackup() error {
 	)
 
 	if !atomic.CompareAndSwapUint32(&t.locker, 0, 1) {
-		log.Printf("Already locked %s; skipping", t)
+		t.log.Infof("Already locked; skipping")
 		return nil
 	}
 	defer atomic.StoreUint32(&t.locker, 0)
-	log.Printf("Starting base backup of %s", t)
+	t.log.Infof("Starting base backup")
 
 	if t.stagingDir != "" {
 		tableInfoDir = t.stagingDir
@@ -71,7 +70,7 @@ func (t *TableBackup) RunBasebackup() error {
 	}()
 
 	if !t.lastBasebackupTime.IsZero() && time.Since(t.lastBasebackupTime) <= sleepBetweenBackups {
-		log.Printf("base backups happening too often; skipping")
+		t.log.Warnf("base backups happening too often; skipping")
 		return nil
 	}
 
@@ -94,7 +93,7 @@ func (t *TableBackup) RunBasebackup() error {
 		defer func() {
 			if stop || err != nil {
 				if err2 := t.txRollback(); err2 != nil {
-					log.Printf("could not rollback: %v", err2)
+					t.log.WithError(err2).Errorf("could not rollback")
 					if err == nil {
 						err = err2
 					}
@@ -116,7 +115,7 @@ func (t *TableBackup) RunBasebackup() error {
 
 		exists, err := t.lockTableAndCheckIfExists()
 		if !exists {
-			log.Printf("table %v has been dropped, removing it from the backup", t)
+			t.log.Infof("table has been dropped, removing it from the backup")
 			return true, ErrTableNotFound
 		}
 		if err != nil {
@@ -132,7 +131,7 @@ func (t *TableBackup) RunBasebackup() error {
 		if hasRows, err := t.hasRows(); err != nil {
 			return true, fmt.Errorf("could not check if table has rows: %v", err)
 		} else if !hasRows {
-			log.Printf("table %s seems to have no rows; skipping", t.NamespacedName)
+			t.log.Infof("table has no rows, nothing to backup")
 			return false, nil
 		}
 
@@ -158,7 +157,7 @@ func (t *TableBackup) RunBasebackup() error {
 	}
 
 	if err := os.Rename(tempInfoFilepath, path.Join(tableInfoDir, BaseBackupStateFileName)); err != nil {
-		log.Printf("could not rename: %v", err)
+		t.log.WithError(err).Errorf("could not rename")
 	}
 
 	// remove all deltas before this point, but keep the latest delta started before the backup, because it may
@@ -171,31 +170,32 @@ func (t *TableBackup) RunBasebackup() error {
 	candidateLSN := postBackupLSN
 
 	if candidateLSN > backupLSN {
-		log.Printf("first delta lsn to keep %s is higher than the backup lsn %s, attempting the previous delta lsn %s",
-			postBackupLSN, backupLSN, preBackupLSN)
+		t.log.WithCustomNamedLSN("latest candidate LSN", postBackupLSN).
+			WithCustomNamedLSN("backup LSN", backupLSN).
+			WithCustomNamedLSN("previous candidate LSN", preBackupLSN).
+			Debugf("first delta lsn to keep is higher than the backup lsn, attempting the previous delta lsn")
 		// looks like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
-			log.Panic(fmt.Sprintf("table %s: logical backup lsn %s points to an earlier location than the lsn"+
-				" of the latest delta created before it %s",
-				t, backupLSN, t.firstDeltaLSNToKeep))
+			t.log.WithCustomNamedLSN("backup LSN", backupLSN).
+				WithCustomNamedLSN("previous delta LSN", preBackupLSN).
+				DPanic("logical backup lsn points to an earlier location than the lsn of the latest delta created before it")
 		}
 		candidateLSN = preBackupLSN
 	}
 
 	// Make sure we have a cutoff point
 	if candidateLSN == 0 {
-		log.Printf("first delta to keep lsn is not defined, reverting to the backup lsn %s", backupLSN)
+		t.log.WithCustomNamedLSN("backup LSN", backupLSN).
+			Infof("first delta to keep lsn is not defined, reverting to the backup lsn")
 		candidateLSN = backupLSN
 	}
 
 	t.firstDeltaLSNToKeep = candidateLSN
 	t.queueArchiveFile(BaseBackupStateFileName)
 
-	log.Printf("%s backed up in %v; start lsn: %s, first delta lsn to keep: %s",
-		t.String(),
-		t.lastBackupDuration.Truncate(1*time.Second),
-		backupLSN,
-		t.firstDeltaLSNToKeep)
+	t.log.WithCustomNamedLSN("start LSN", backupLSN).
+		WithCustomNamedLSN("first delta to keep LSN", t.firstDeltaLSNToKeep).
+		Infof("back up finished in %v", t.lastBackupDuration.Truncate(1*time.Second))
 
 	// note that the archiver has stopped archiving old deltas, we can purge them from both staging and final directories
 	for _, baseDir := range []string{t.stagingDir, t.archiveDir} {
@@ -233,12 +233,13 @@ func (t *TableBackup) updateMetricsAfterBaseBackup() {
 		promexporter.PerTableLastBackupEndTimestamp,
 		float64(t.lastBasebackupTime.Unix()), []string{t.OID().String(), t.TextID()})
 	if err != nil {
-		log.Printf("could not set %s: %v", promexporter.PerTableLastBackupEndTimestamp, err)
+		t.log.WithError(err).Errorf("could not set %s", promexporter.PerTableLastBackupEndTimestamp)
 	}
 
 	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.OID().String(), t.TextID()})
 	if err != nil {
-		log.Printf("could not reset %s: %v", promexporter.PerTableMessageSinceLastBackupGauge, err)
+		t.log.WithError(err).Errorf("could not reset %s", promexporter.PerTableMessageSinceLastBackupGauge)
+
 	}
 }
 
@@ -277,7 +278,8 @@ func (t *TableBackup) tempSlotName() string {
 }
 
 func (t *TableBackup) purgeObsoleteDeltaFiles(deltasDir string) error {
-	log.Printf("Purging segments in %s before the LSN %s", deltasDir, t.firstDeltaLSNToKeep)
+	t.log.WithCustomNamedLSN("first delta to keep LSN", t.firstDeltaLSNToKeep).
+		Infof("Purging segments in %s")
 	fileList, err := ioutil.ReadDir(deltasDir)
 	if err != nil {
 		return fmt.Errorf("could not list directory: %v", err)
@@ -439,8 +441,8 @@ func (t *TableBackup) createTempReplicationSlot() (dbutils.LSN, error) {
 
 	defer func() {
 		if _, err := t.tx.Exec(fmt.Sprintf("DROP_REPLICATION_SLOT %s", t.tempSlotName())); err != nil {
-			log.Printf("could not drop replication slot %s right away: %v, it will be dropped at the end of the backup",
-				t.tempSlotName(), err)
+			t.log.WithError(err).WithHint("slot will be dropped at the end of the backup").
+				Warnf("could not drop replication slot %s", t.tempSlotName())
 		}
 	}()
 

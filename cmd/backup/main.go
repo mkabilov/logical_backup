@@ -15,8 +15,8 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yaml", "path to the config file")
-	version    = flag.Bool("version", false, "Print version information")
-	debug      = flag.Bool("debug", false, "Enable debug mode")
+	version    = flag.Bool("version", false, "print version information")
+	debug      = flag.Bool("debug", false, "enable debug mode")
 
 	Version  string
 	Revision string
@@ -28,10 +28,26 @@ func buildInfo() string {
 	return fmt.Sprintf("logical backup version %s git revision %s go version %s", Version, Revision, GoVersion)
 }
 
-func main() {
+func initGlobalLogger(debug bool) func() {
+	var (
+		global *zap.Logger
+		err    error
+	)
 
-	global, _ := zap.NewDevelopment()
-	zap.ReplaceGlobals(global)
+	if debug {
+		global, err = zap.NewDevelopment()
+	} else {
+		global, err = zap.NewProduction()
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
+		os.Exit(1)
+	}
+	return zap.ReplaceGlobals(global)
+}
+
+func main() {
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s\n", buildInfo())
@@ -40,6 +56,8 @@ func main() {
 	}
 
 	flag.Parse()
+	initGlobalLogger(*debug)
+
 	if *version {
 		fmt.Println(buildInfo())
 		os.Exit(1)

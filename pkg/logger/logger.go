@@ -38,6 +38,11 @@ func (l *Log) WithTableName(n message.NamespacedName) *Log {
 	return &Log{l.With("table name", n.Sanitize())}
 }
 
+// WithTableName returns a logger with a table name string provided in the logging context.
+func (l *Log) WithTableNameString(t string) *Log {
+	return &Log{l.With("table name", t)}
+}
+
 // WithReplicationMessage returns a logger with a replication message provided in the logging context.
 func (l *Log) WithReplicationMessage(message []byte) *Log {
 	return &Log{l.With("message", message)}
@@ -52,6 +57,13 @@ func (l *Log) WithFilename(filename string) *Log {
 // for instance, to provide values of the parameters relevant to the logging message.
 func (l *Log) WithDetail(template string, args ...interface{}) *Log {
 	return &Log{l.With("detail", fmt.Sprintf(template, args...))}
+}
+
+// WithHint is identical to WithDetail, although provides hint instead of a detail. Use it
+// to inform users about possible consequences of the event being logged or followup actions.
+// for instance, to provide values of the parameters relevant to the logging message.
+func (l *Log) WithHint(template string, args ...interface{}) *Log {
+	return &Log{l.With("hint", fmt.Sprintf(template, args...))}
 }
 
 // NewLogger creates a new logger with a given name, either a development or production one.
@@ -74,6 +86,11 @@ func NewLogger(name string, development bool) (*Log, error) {
 }
 
 // NewLoggerFrom creates a new logger from the existing one, adding a name and, optionally, arbitrary fields with values.
-func NewLoggerFrom(existing *Log, name string, withFields ...interface{}) *Log {
-	return &Log{existing.Named(name).With(withFields)}
+func NewLoggerFrom(existing *Log, name string, withFields ...interface{}) (result *Log) {
+	if len(withFields) > 0 {
+		result = &Log{existing.Named(name).With(withFields)}
+	} else {
+		result = &Log{existing.Named(name)}
+	}
+	return
 }

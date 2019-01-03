@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
-	"log"
 
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
@@ -107,7 +106,6 @@ func CreateMissingPublication(conn *pgx.Conn, publicationName string) error {
 		return fmt.Errorf("could not create publication: %v", err)
 	}
 	rows.Close()
-	log.Printf("created missing publication: %q", query)
 
 	return nil
 }

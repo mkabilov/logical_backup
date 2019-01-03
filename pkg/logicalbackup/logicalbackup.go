@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx"
-	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
@@ -187,6 +186,7 @@ func (b *LogicalBackup) prepareDB() error {
 	if err := dbutils.CreateMissingPublication(conn, b.cfg.PublicationName); err != nil {
 		return err
 	}
+	b.log.WithDetail("PublicationName: %s", b.cfg.PublicationName).Debugf("created missing publication")
 
 	b.latestFlushLSN, err = dbutils.GetSlotFlushLSN(conn, b.cfg.SlotName, b.cfg.DB.Database)
 	if err != nil {
@@ -708,19 +708,17 @@ func (b *LogicalBackup) writeRestartLSN() error {
 func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 	defer b.waitGr.Done()
 
-	baseBackupLog := func() *zap.SugaredLogger {
-		return b.log.Named(fmt.Sprintf("background base backuper %d", i))
-	}
+	baseBackupLog := logger.NewLoggerFrom(b.log, fmt.Sprintf("background base backuper %d", i))
 
 	for {
 		obj, err := b.basebackupQueue.Get()
 		if err == context.Canceled {
-			baseBackupLog().Warn("quiting")
+			baseBackupLog.Warn("quiting")
 			return
 		}
 
 		t := obj.(tablebackup.TableBackuper)
-		baseBackupLog().With("table", t).Debugf("backing up table")
+		baseBackupLog.WithTableNameString(t.String()).Debugf("backing up table")
 		if err := t.RunBasebackup(); err != nil {
 			if err == tablebackup.ErrTableNotFound {
 				// Remove the table from the list of those to backup.
@@ -728,7 +726,7 @@ func (b *LogicalBackup) BackgroundBasebackuper(i int) {
 				t.Stop()
 				b.backupTables.Delete(t.OID())
 			} else if err != context.Canceled {
-				b.log.WithError(err).With("table", t).Errorf("could not basebackup")
+				baseBackupLog.WithError(err).WithTableNameString(t.String()).Errorf("could not basebackup")
 			}
 		}
 		// from now on we can schedule new basebackups on that table
@@ -800,6 +798,8 @@ func (b *LogicalBackup) Run() error {
 
 	b.cancel()
 	b.Wait()
+	b.log.Sync()
+	b.backupTables.Map(func(t tablebackup.TableBackuper) { t.Stop() })
 
 	return nil
 }

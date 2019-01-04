@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 
@@ -28,7 +27,6 @@ func buildInfo() string {
 }
 
 func main() {
-
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "%s\n", buildInfo())
 		fmt.Fprintf(os.Stderr, "\nUsage:\n")
@@ -36,11 +34,6 @@ func main() {
 	}
 
 	flag.Parse()
-	if _, err := logger.InitGlobalLogger(*debug); err != nil {
-		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
-		os.Exit(1)
-	}
-
 	if *version {
 		fmt.Println(buildInfo())
 		os.Exit(1)
@@ -56,12 +49,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Could not load config file: %v", err)
 		os.Exit(1)
 	}
+	// Initialize the logger after we've resolved the debug flag but before its first usage at cfg.Print
+	if err := logger.InitGlobalLogger(*debug); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
+		os.Exit(1)
+	}
 
 	cfg.Print()
 
 	lb, err := logicalbackup.New(cfg)
 	if err != nil {
-		log.Fatalf("could not create backup instance: %v", err)
+		logger.G.Fatalf("could not create backup instance: %v", err)
 	}
 
 	if err := lb.Run(); err != nil {

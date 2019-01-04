@@ -13,22 +13,14 @@ type Log struct {
 	*zap.SugaredLogger
 }
 
-func InitGlobalLogger(debug bool) (func(), error) {
-	var (
-		global *zap.Logger
-		err    error
-	)
+var G *Log
 
-	if debug {
-		global, err = zap.NewDevelopment()
-	} else {
-		global, err = zap.NewProduction()
+func InitGlobalLogger(debug bool, args ...interface{}) (err error) {
+	G, err = NewLogger("main", debug)
+	if err == nil && len(args) > 0 {
+		G = NewLoggerFrom(G, "", args...)
 	}
-
-	if err != nil {
-		return nil, err
-	}
-	return zap.ReplaceGlobals(global), nil
+	return
 }
 
 // WithError returns a logger with an error field provided in the logging context.
@@ -106,9 +98,13 @@ func NewLogger(name string, development bool) (*Log, error) {
 // NewLoggerFrom creates a new logger from the existing one, adding a name and, optionally, arbitrary fields with values.
 func NewLoggerFrom(existing *Log, name string, withFields ...interface{}) (result *Log) {
 	if len(withFields) > 0 {
-		result = &Log{existing.Named(name).With(withFields)}
+		result = &Log{existing.Named(name).With(withFields...)}
 	} else {
 		result = &Log{existing.Named(name)}
 	}
 	return
+}
+
+func PrintMessageForDebug(prefix string, msg message.Message, currentLSN dbutils.LSN, log *Log) {
+	log.WithLSN(currentLSN).Debugf(prefix+" %T", msg)
 }

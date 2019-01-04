@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx"
-	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
+
+	"github.com/ikitiki/logical_backup/pkg/logger"
 )
 
 const (
@@ -63,7 +64,8 @@ func (c Config) Print() {
 		{"Archive directory", c.ArchiveDir},
 		{"BackupThreshold", fmt.Sprintf("%d", c.BackupThreshold)},
 		{"DeltasPerFile", fmt.Sprintf("%d", c.DeltasPerFile)},
-		{"DB Connection String", fmt.Sprintf("%s@%s:%d/%s slot:%q publication:%q", c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)},
+		{"DB Connection String", fmt.Sprintf("%s@%s:%d/%s slot:%q publication:%q",
+			c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)},
 		{"Track New Tables", fmt.Sprintf("%t", c.TrackNewTables)},
 		{"Fsync", fmt.Sprintf("%t", c.Fsync)},
 		{"Debug mode", fmt.Sprintf("%t", c.Debug)},
@@ -71,14 +73,14 @@ func (c Config) Print() {
 
 	if c.StagingDir == "" {
 		ops = ops[1:]
-		zap.S().Infof("No staging directory specified. Files will be written directly to the archive directory")
+		logger.G.Infof("No staging directory specified. Files will be written directly to the archive directory")
 	}
 	if c.ForceBasebackupAfterInactivityInterval > 0 {
 		ops = append(ops, []string{"Force new basebackup of a modified table after inactivity", fmt.Sprintf("%v", c.ForceBasebackupAfterInactivityInterval)})
 	}
 
 	for _, opt := range ops {
-		zap.S().With(opt[0], opt[1]).Info("option")
+		logger.G.With(opt[0], opt[1]).Info("option")
 	}
 
 }

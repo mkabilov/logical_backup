@@ -197,21 +197,22 @@ func (b *LogicalBackup) prepareDB() error {
 	slotExists := b.latestFlushLSN.IsValid()
 	if !slotExists {
 		// TODO: this will discard all existing backup data, we should probably bail out if existing backup is there
-		b.log.Infof("Creating logical replication slot %s", b.cfg.SlotName)
+		b.log.WithDetail("slot name = %q", b.cfg.SlotName).Debugf("Creating logical replication slot")
 
 		initialLSN, err := dbutils.CreateSlot(conn, b.ctx, b.cfg.SlotName)
 		if err != nil {
 			return fmt.Errorf("could not create replication slot: %v", err)
 		}
 		b.log.WithCustomNamedLSN("Consistent point LSN", initialLSN).
-			Infof("Created missing replication slot %q", b.cfg.SlotName)
+			WithDetail("slot name = %q", b.cfg.SlotName).
+			Infof("Created missing replication slot")
 
 		// solve impedance mismatch between the flush LSN (the LSN we confirmed and flushed) and slot initial LSN
 		// (next, but not yet received LSN).
 		b.latestFlushLSN = initialLSN - 1
 
 		if err := b.writeRestartLSN(); err != nil {
-			b.log.WithError(err).WithLSN(b.latestFlushLSN).Errorw("could not store initial LSN")
+			b.log.WithError(err).WithLSN(b.latestFlushLSN).Error("could not store initial LSN")
 		}
 	} else {
 		restartLSN, err := b.readRestartLSN()
@@ -221,8 +222,6 @@ func (b *LogicalBackup) prepareDB() error {
 		if restartLSN.IsValid() {
 			b.latestFlushLSN = restartLSN
 		}
-		// nothing to call home about, we may have flushed the final segment at shutdown
-		// without bothering to advance the slot LSN.
 		if err := b.sendStatus(); err != nil {
 			b.log.WithError(err).Errorf("could not send replay progress")
 		}
@@ -272,7 +271,7 @@ func (b *LogicalBackup) baseDir() string {
 func (b *LogicalBackup) processDMLMessage(tableOID dbutils.OID, typ msgType, msg []byte) error {
 	bt, ok := b.backupTables.Get(tableOID)
 	if !ok {
-		b.log.With("OID", tableOID).Warnf("table is not tracked")
+		b.log.WithOID(tableOID).Warnf("table is not tracked")
 		return nil
 	}
 
@@ -326,6 +325,7 @@ func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
 	var err error
 
 	b.currentLSN = walStart
+	logger.PrintMessageForDebug("received", m, b.currentLSN, b.log)
 
 	switch v := m.(type) {
 	case message.Relation:
@@ -426,7 +426,8 @@ func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
 func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 	if !b.cfg.TrackNewTables {
 		b.log.WithOID(m.OID).WithTableName(m.NamespacedName).
-			Infow("ignoring relation message because we are configured not to track new tables")
+			WithDetail("TrackNewTables = %t", b.cfg.TrackNewTables).
+			Info("ignoring relation message for the new table")
 		return false, nil
 	}
 
@@ -436,7 +437,7 @@ func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
 	}
 
 	b.backupTables.Set(m.OID, tb)
-	b.log.WithOID(m.OID).WithTableName(m.NamespacedName).Infow("registered new table")
+	b.log.WithOID(m.OID).WithTableName(m.NamespacedName).Info("registered new table")
 
 	return true, nil
 }
@@ -517,7 +518,7 @@ func (b *LogicalBackup) logicalDecoding() {
 				// message that doesn't have any LSN assigned.
 				if walStart.IsValid() && walStart <= b.latestFlushLSN {
 					b.log.WithLSN(b.currentLSN).WithCustomNamedLSN("Flush LSN", b.latestFlushLSN).
-						Info("skip WAL message with LSN that is lower or equal to the flush LSN")
+						Info("skip replication message with LSN that is lower or equal to the flush LSN")
 					continue
 				}
 				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
@@ -799,7 +800,6 @@ func (b *LogicalBackup) Run() error {
 	b.cancel()
 	b.Wait()
 	b.log.Sync()
-	b.backupTables.Map(func(t tablebackup.TableBackuper) { t.Stop() })
 
 	return nil
 }

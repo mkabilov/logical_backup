@@ -173,7 +173,7 @@ func (t *TableBackup) RunBasebackup() error {
 		t.log.WithCustomNamedLSN("latest candidate LSN", postBackupLSN).
 			WithCustomNamedLSN("backup LSN", backupLSN).
 			WithCustomNamedLSN("previous candidate LSN", preBackupLSN).
-			Debugf("first delta lsn to keep is higher than the backup lsn, attempting the previous delta lsn")
+			Debug("first delta lsn to keep is higher than the backup lsn, attempting the previous delta lsn")
 		// looks like the slot that has been created after the delta segment got an LSN that is lower than that segment!
 		if preBackupLSN > backupLSN {
 			t.log.WithCustomNamedLSN("backup LSN", backupLSN).
@@ -186,7 +186,7 @@ func (t *TableBackup) RunBasebackup() error {
 	// Make sure we have a cutoff point
 	if candidateLSN == 0 {
 		t.log.WithCustomNamedLSN("backup LSN", backupLSN).
-			Infof("first delta to keep lsn is not defined, reverting to the backup lsn")
+			Debug("first delta to keep lsn is not defined, reverting to the backup lsn")
 		candidateLSN = backupLSN
 	}
 
@@ -239,7 +239,6 @@ func (t *TableBackup) updateMetricsAfterBaseBackup() {
 	err = t.prom.Reset(promexporter.PerTableMessageSinceLastBackupGauge, []string{t.OID().String(), t.TextID()})
 	if err != nil {
 		t.log.WithError(err).Errorf("could not reset %s", promexporter.PerTableMessageSinceLastBackupGauge)
-
 	}
 }
 
@@ -279,7 +278,7 @@ func (t *TableBackup) tempSlotName() string {
 
 func (t *TableBackup) purgeObsoleteDeltaFiles(deltasDir string) error {
 	t.log.WithCustomNamedLSN("first delta to keep LSN", t.firstDeltaLSNToKeep).
-		Infof("Purging segments in %s")
+		Infof("Purging segments in directory %s", deltasDir)
 	fileList, err := ioutil.ReadDir(deltasDir)
 	if err != nil {
 		return fmt.Errorf("could not list directory: %v", err)

@@ -94,10 +94,3 @@ func SyncFileAndDirectory(fp *os.File) error {
 
 	return nil
 }
-
-func Ternary(cond bool, ifTrue, ifFalse interface{}) interface{} {
-	if cond {
-		return ifTrue
-	}
-	return ifFalse
-}

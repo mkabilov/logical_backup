@@ -290,7 +290,9 @@ func (t *TableBackup) writeSegmentToFile() error {
 		}
 	}
 	t.flushLSN = t.currentLSN
-	t.log.WithCustomNamedLSN("Flush LSN", t.flushLSN).Debugf("flushed current segment to disk file %s", deltaFilepath)
+	t.log.WithCustomNamedLSN("New flush LSN", t.flushLSN).
+		WithFilename(deltaFilepath).
+		Debug("flushed current segment to disk")
 
 	if err = t.StoreState(); err != nil {
 		return fmt.Errorf("could not write table backup state to file: %v", err)
@@ -376,7 +378,7 @@ func (t *TableBackup) archiver() {
 
 					lsn, err = utils.GetLSNFromDeltaFilename(filename)
 					if err != nil {
-						t.log.WithError(err).Errorf("could not decode lsn from the file name %s", filename)
+						t.log.WithError(err).WithFilename(filename).Error("could not decode lsn from the file")
 					}
 				}
 
@@ -398,7 +400,7 @@ func (t *TableBackup) archiver() {
 
 				err = utils.Retry(archiveAction, maxArchiverRetryAttempts, archiverWorkerNapTime, maxArchiverRetryTimeout)
 				if err != nil {
-					t.log.WithError(err).Errorf("could not archive %s", fname)
+					t.log.WithFilename(fname).WithError(err).Error("could not archive file")
 					continue
 				}
 
@@ -421,7 +423,7 @@ func (t *TableBackup) janitor() {
 
 			if err := t.archiveCurrentSegment("shutdown"); err != nil {
 				t.log.WithError(err).WithFilename(t.segmentFilename).
-					Error("could not write changes to on shutdown")
+					Error("could not write changes on shutdown")
 			}
 			return
 		case <-closeCall.C:
@@ -447,7 +449,7 @@ func (t *TableBackup) archiveCurrentSegment(reason string) error {
 		return nil
 	}
 
-	t.log.WithFilename(t.segmentFilename).Debugf("writing and archiving current segment due to the %s", reason)
+	t.log.WithFilename(t.segmentFilename).Debugf("writing and archiving current segment due to %s", reason)
 	if err := t.writeSegmentToFile(); err != nil {
 		return err
 	}
@@ -487,7 +489,7 @@ func archiveOneFile(sourceFile, destFile string, fsync bool, log *logger.Log) er
 			st.Size() == 0 {
 			os.Remove(destFile)
 		} else {
-			log.WithFilename(destFile).Warnf("could not archive: destination file is not empty")
+			log.WithFilename(destFile).Warn("could not archive: destination file is not empty")
 			return nil
 		}
 	}
@@ -498,10 +500,10 @@ func archiveOneFile(sourceFile, destFile string, fsync bool, log *logger.Log) er
 	}
 
 	if err := os.Remove(sourceFile); err != nil {
-		log.WithError(err).Errorf("could not delete already archived file")
+		log.WithError(err).Error("could not delete file after moving it to the archive")
 	}
 
-	log.WithFilename(destFile).Infof("successfully archived")
+	log.WithFilename(destFile).Info("successfully archived")
 
 	return nil
 }
@@ -674,7 +676,7 @@ func (t *TableBackup) StoreState() error {
 	tableDirectory := t.getDirectory()
 	fp, err := ioutil.TempFile(tableDirectory, DeltasState)
 	if err != nil {
-		t.log.WithError(err).WithFilename(fp.Name()).Errorf("could not create temporary state file")
+		t.log.WithError(err).WithFilename(fp.Name()).Error("could not create temporary state file")
 	}
 
 	// close the file before returning and remove it if any errors occurred (otherwsie, it should be renamed already)

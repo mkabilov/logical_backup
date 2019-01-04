@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"go.uber.org/zap"
 	"os"
 
 	"github.com/jackc/pgx"
@@ -44,13 +43,15 @@ func init() {
 
 func main() {
 
-	if _, err := logger.InitGlobalLogger(false); err != nil {
+	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
+
+	if err := logger.InitGlobalLogger(*debug, "table to restore", tbl.String()); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
 		os.Exit(1)
 	}
 
 	if *targetTable != "" {
-		zap.S().Infof("restoring into %v", targetTable)
+		logger.G.Infof("restoring into %v", targetTable)
 	}
 
 	config := pgx.ConnConfig{
@@ -61,13 +62,12 @@ func main() {
 		Host:     *pgHost,
 	}
 
-	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
 	r, err := logicalrestore.New(tbl, *backupDir, config, *debug)
 	if err != nil {
-		zap.S().Fatalf("could not create backup logger: %v", err)
+		logger.G.WithError(err).Fatalf("could not create backup logger")
 	}
 
 	if err := r.Restore(); err != nil {
-		zap.S().Fatalf("could not restore table: %v", err)
+		logger.G.WithError(err).Fatalf("could not restore table")
 	}
 }

@@ -208,7 +208,7 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			return fmt.Errorf("could not parse message: %v", err)
 		}
 
-		printMessage(msg, r.curLsn, r.log)
+		logger.PrintMessageForDebug("restored", msg, r.curLsn, r.log)
 
 		switch v := msg.(type) {
 		case message.Relation:
@@ -275,10 +275,6 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 	}
 
 	return nil
-}
-
-func printMessage(msg message.Message, currentLSN dbutils.LSN, log *logger.Log) {
-	log.WithLSN(currentLSN).Debugf("restored %T", msg)
 }
 
 func (r *LogicalRestore) execSQL(sql string) error {

@@ -2,9 +2,11 @@ package logger
 
 import (
 	"fmt"
+
+	"go.uber.org/zap"
+
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
-	"go.uber.org/zap"
 )
 
 // Log is a wrapper around zap.SugarLogger, providing a bunch of With... functions to ease writing log messages.
@@ -16,7 +18,7 @@ type Log struct {
 var G *Log
 
 func InitGlobalLogger(debug bool, args ...interface{}) (err error) {
-	G, err = NewLogger("main", debug)
+	G, err = NewLogger("global", debug)
 	if err == nil && len(args) > 0 {
 		G = NewLoggerFrom(G, "", args...)
 	}

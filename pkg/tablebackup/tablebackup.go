@@ -146,7 +146,7 @@ func New(ctx context.Context, group *sync.WaitGroup,
 		archiveFilesQueue:  queue.New(ctx),
 		segmentBufferMutex: &sync.Mutex{},
 		prom:               prom,
-		log:                logger.NewLoggerFrom(parentLogger, fmt.Sprintf("table backup for %s", tbl), "OID", oid),
+		log:                logger.NewLoggerFrom(parentLogger, fmt.Sprintf("table backup for %q", tbl), "OID", oid),
 	}
 	if cfg.StagingDir != "" {
 		tb.stagingDir = path.Join(cfg.StagingDir, tableDir)
@@ -178,7 +178,9 @@ func New(ctx context.Context, group *sync.WaitGroup,
 func (t *TableBackup) Stop() {
 	t.log.Warnf("terminating")
 	t.cancel()
-	t.log.Sync()
+	if err := t.log.Sync(); err != nil {
+		logger.G.WithError(err).WithTableNameString(t.String()).Error("could not sync per-table log")
+	}
 }
 
 func (t *TableBackup) queueArchiveFile(filename string) {
@@ -201,7 +203,7 @@ func (t *TableBackup) WriteDelta(msg []byte, commitLSN dbutils.LSN, currentLSN d
 	// check if we have already flushed past this message to disk
 	if currentLSN <= t.flushLSN {
 		t.log.WithLSN(currentLSN).WithCustomNamedLSN("flush LSN", t.flushLSN).
-			Info("skip write of an already written delta with LSN preceeding the flushed one")
+			Debug("skip write of an already written delta with LSN preceeding the flushed one")
 		return 0, nil
 	}
 

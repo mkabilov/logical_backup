@@ -2,11 +2,13 @@ package main
 
 import (
 	"flag"
-	"log"
+	"fmt"
+	"go.uber.org/zap"
 	"os"
 
 	"github.com/jackc/pgx"
 
+	"github.com/ikitiki/logical_backup/pkg/logger"
 	"github.com/ikitiki/logical_backup/pkg/logicalrestore"
 	"github.com/ikitiki/logical_backup/pkg/message"
 )
@@ -15,6 +17,7 @@ var (
 	pgUser, pgPass, pgHost, pgDbname              *string
 	targetTable, backupDir, tableName, schemaName *string
 	pgPort                                        *uint
+	debug                                         *bool
 )
 
 func init() {
@@ -29,6 +32,7 @@ func init() {
 	schemaName = flag.String("schema", "public", "Schema name")
 	targetTable = flag.String("target-table", "", "Target table name (optional)")
 	backupDir = flag.String("backup-dir", "", "Backups dir")
+	debug = flag.Bool("debug", false, "Toggle debug mode")
 
 	flag.Parse()
 
@@ -39,8 +43,14 @@ func init() {
 }
 
 func main() {
+
+	if _, err := logger.InitGlobalLogger(false); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
+		os.Exit(1)
+	}
+
 	if *targetTable != "" {
-		log.Printf("restoring into %v", targetTable)
+		zap.S().Infof("restoring into %v", targetTable)
 	}
 
 	config := pgx.ConnConfig{
@@ -52,9 +62,12 @@ func main() {
 	}
 
 	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
-	r := logicalrestore.New(tbl, *backupDir, config)
+	r, err := logicalrestore.New(tbl, *backupDir, config, *debug)
+	if err != nil {
+		zap.S().Fatalf("could not create backup logger: %v", err)
+	}
 
 	if err := r.Restore(); err != nil {
-		log.Fatalf("could not restore table: %v", err)
+		zap.S().Fatalf("could not restore table: %v", err)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path"
 	"reflect"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/decoder"
+	"github.com/ikitiki/logical_backup/pkg/logger"
 	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
@@ -28,6 +28,7 @@ type LogicalRestorer interface {
 }
 
 type LogicalRestore struct {
+	log *logger.Log
 	message.NamespacedName
 
 	startLSN dbutils.LSN
@@ -44,13 +45,19 @@ type LogicalRestore struct {
 	curLsn  dbutils.LSN
 }
 
-func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig) *LogicalRestore {
-	return &LogicalRestore{
+func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig, debug bool) (*LogicalRestore, error) {
+	lr := &LogicalRestore{
 		ctx:            context.Background(),
 		baseDir:        dir,
 		cfg:            cfg,
 		NamespacedName: tbl,
 	}
+	if l, err := logger.NewLogger("logical restore", debug); err != nil {
+		return nil, err
+	} else {
+		lr.log = l
+	}
+	return lr, nil
 }
 
 func (r *LogicalRestore) connect() error {
@@ -142,7 +149,7 @@ func (r *LogicalRestore) loadDump() error {
 	dumpFilename := path.Join(r.baseDir, utils.TableDir(r.tblOid), tablebackup.BasebackupFilename)
 
 	if _, err := os.Stat(dumpFilename); os.IsNotExist(err) {
-		log.Printf("dump file doesn't exist, skipping")
+		r.log.Infof("dump file doesn't exist, skipping")
 
 		return nil
 	}
@@ -160,7 +167,7 @@ func (r *LogicalRestore) loadDump() error {
 	if err := r.conn.CopyFromReader(fp, fmt.Sprintf("copy %s from stdin", r.Sanitize())); err != nil {
 		return fmt.Errorf("could not copy: %v", err)
 	} else {
-		log.Printf("initial dump loaded")
+		r.log.Infof("initial dump loaded")
 	}
 
 	if err := r.commit(); err != nil {
@@ -171,7 +178,7 @@ func (r *LogicalRestore) loadDump() error {
 }
 
 func (r *LogicalRestore) applySegmentFile(filePath string) error {
-	log.Printf("reading %q segment file", filePath)
+	r.log.WithFilename(filePath).Debugf("reading segment file")
 
 	fp, err := os.OpenFile(filePath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -201,7 +208,7 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			return fmt.Errorf("could not parse message: %v", err)
 		}
 
-		printMessage(msg, r.curLsn)
+		printMessage(msg, r.curLsn, r.log)
 
 		switch v := msg.(type) {
 		case message.Relation:
@@ -212,7 +219,9 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			}
 
 			if v.FinalLSN < r.startLSN {
-				log.Printf("reading transaction begin for commit LSN %s smaller than start LSN %s", v.FinalLSN, r.startLSN)
+				r.log.WithCustomNamedLSN("commit LSN", v.FinalLSN).
+					WithCustomNamedLSN("start LSN", r.startLSN).
+					Infof("reading transaction begin for commit LSN smaller than start LSN")
 				r.curLsn = dbutils.InvalidLSN
 				r.curTx = 0
 				break
@@ -252,7 +261,7 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 			if err := r.applyDMLMessage(msg); err == nil {
 				break
 			} else {
-				log.Printf("could not apply delta message: %v", err)
+				r.log.WithError(err).Error("could not apply delta message")
 			}
 
 			if r.tx != nil {
@@ -268,8 +277,8 @@ func (r *LogicalRestore) applySegmentFile(filePath string) error {
 	return nil
 }
 
-func printMessage(msg message.Message, currentLSN dbutils.LSN) {
-	log.Printf("restored %T with LSN %s", msg, currentLSN)
+func printMessage(msg message.Message, currentLSN dbutils.LSN, log *logger.Log) {
+	log.WithLSN(currentLSN).Debugf("restored %T", msg)
 }
 
 func (r *LogicalRestore) execSQL(sql string) error {
@@ -311,7 +320,7 @@ func (r *LogicalRestore) applyDeltas() error {
 	}
 
 	if len(segmentFiles) == 0 {
-		log.Printf("no delta files")
+		r.log.Warnf("no delta files")
 		return nil
 	}
 

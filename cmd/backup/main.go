@@ -8,9 +8,8 @@ import (
 	"runtime"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
+	"github.com/ikitiki/logical_backup/pkg/logger"
 	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
-
-	"go.uber.org/zap"
 )
 
 var (
@@ -28,25 +27,6 @@ func buildInfo() string {
 	return fmt.Sprintf("logical backup version %s git revision %s go version %s", Version, Revision, GoVersion)
 }
 
-func initGlobalLogger(debug bool) func() {
-	var (
-		global *zap.Logger
-		err    error
-	)
-
-	if debug {
-		global, err = zap.NewDevelopment()
-	} else {
-		global, err = zap.NewProduction()
-	}
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
-		os.Exit(1)
-	}
-	return zap.ReplaceGlobals(global)
-}
-
 func main() {
 
 	flag.Usage = func() {
@@ -56,7 +36,10 @@ func main() {
 	}
 
 	flag.Parse()
-	initGlobalLogger(*debug)
+	if _, err := logger.InitGlobalLogger(*debug); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
+		os.Exit(1)
+	}
 
 	if *version {
 		fmt.Println(buildInfo())

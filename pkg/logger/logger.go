@@ -13,6 +13,24 @@ type Log struct {
 	*zap.SugaredLogger
 }
 
+func InitGlobalLogger(debug bool) (func(), error) {
+	var (
+		global *zap.Logger
+		err    error
+	)
+
+	if debug {
+		global, err = zap.NewDevelopment()
+	} else {
+		global, err = zap.NewProduction()
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	return zap.ReplaceGlobals(global), nil
+}
+
 // WithError returns a logger with an error field provided in the logging context.
 func (l *Log) WithError(err error) *Log {
 	return &Log{l.With("error", err)}

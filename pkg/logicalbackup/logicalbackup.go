@@ -126,7 +126,7 @@ func New(cfg *config.Config) (*LogicalBackup, error) {
 		prom:             prom.New(cfg.PrometheusPort),
 	}
 
-	if l, err := logger.NewLogger("logical backup", cfg.Debug); err != nil {
+	if l, err := logger.NewLogger("logical backup", cfg.Log); err != nil {
 		return nil, fmt.Errorf("could not create backup logger: %v", err)
 	} else {
 		lb.log = l

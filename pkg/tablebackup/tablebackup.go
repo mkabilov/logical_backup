@@ -550,7 +550,7 @@ func (t *TableBackup) setSegmentFilename(newLSN dbutils.LSN) {
 }
 
 func (t *TableBackup) String() string {
-	return t.NamespacedName.Sanitize()
+	return t.NamespacedName.String()
 }
 
 func (t *TableBackup) createDirs() error {

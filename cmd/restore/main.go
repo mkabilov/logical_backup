@@ -16,7 +16,9 @@ var (
 	pgUser, pgPass, pgHost, pgDbname              *string
 	targetTable, backupDir, tableName, schemaName *string
 	pgPort                                        *uint
-	debug                                         *bool
+	logDevelopment                                *bool
+	logLevel                                      *string
+	logShowLocation                               *bool
 )
 
 func init() {
@@ -31,7 +33,9 @@ func init() {
 	schemaName = flag.String("schema", "public", "Schema name")
 	targetTable = flag.String("target-table", "", "Target table name (optional)")
 	backupDir = flag.String("backup-dir", "", "Backups dir")
-	debug = flag.Bool("debug", false, "Toggle debug mode")
+	logDevelopment = flag.Bool("log-development", false, "Enable development logging mode")
+	logLevel = flag.String("log-level", "", "Set log level")
+	logShowLocation = flag.Bool("log-location", true, "Show log location")
 
 	flag.Parse()
 
@@ -41,12 +45,27 @@ func init() {
 	}
 }
 
+func makeLoggerConfig() *logger.LoggerConfig {
+	lc := logger.DefaultLogConfig()
+	lc.Development = *logDevelopment
+	lc.Location = logShowLocation
+
+	if *logLevel != "" {
+		if err := logger.ValidateLogLevel(*logLevel); err != nil {
+			_, _ = fmt.Fprint(os.Stderr, err)
+		}
+		lc.Level = *logLevel
+	}
+	return lc
+}
+
 func main() {
 
 	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
+	lc := makeLoggerConfig()
 
-	if err := logger.InitGlobalLogger(*debug, "table to restore", tbl.String()); err != nil {
-		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
+	if err := logger.InitGlobalLogger(lc, "table to restore", tbl.String()); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Could not initialize global logger")
 		os.Exit(1)
 	}
 
@@ -62,7 +81,7 @@ func main() {
 		Host:     *pgHost,
 	}
 
-	r, err := logicalrestore.New(tbl, *backupDir, config, *debug)
+	r, err := logicalrestore.New(tbl, *backupDir, config, lc)
 	if err != nil {
 		logger.G.WithError(err).Fatalf("could not create backup logger")
 	}

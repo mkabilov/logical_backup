@@ -2,12 +2,20 @@ package logger
 
 import (
 	"fmt"
-
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 )
+
+// LoggerConfig describes the logger configuration. It couldn't be part of config
+// due to cyclic imports (also, it is used outside of the scope of config in restore code).
+type LoggerConfig struct {
+	Level       string `yaml:"level"`
+	Location    *bool  `yaml:"location"`
+	Development bool   `yaml:"development"`
+}
 
 // Log is a wrapper around zap.SugarLogger, providing a bunch of With... functions to ease writing log messages.
 // Note that all With... functions return the Log structure, never the underlying SugarLogger, to allow chain-linking them.
@@ -19,8 +27,8 @@ type Log struct {
 var G *Log
 
 // InitGlobalLogger initializes the package-level logger. It should be called only once at start of the program.
-func InitGlobalLogger(debug bool, args ...interface{}) (err error) {
-	G, err = NewLogger("global", debug)
+func InitGlobalLogger(cfg *LoggerConfig, args ...interface{}) (err error) {
+	G, err = NewLogger("global", cfg)
 	if err == nil && len(args) > 0 {
 		G = NewLoggerFrom(G, "", args...)
 	}
@@ -47,14 +55,14 @@ func (l *Log) WithOID(oid dbutils.OID) *Log {
 	return &Log{l.With("OID", oid)}
 }
 
-// WithTableName returns a logger with a table namespaced name provided in the logging context.
-func (l *Log) WithTableName(n message.NamespacedName) *Log {
-	return &Log{l.With("table name", n.Sanitize())}
-}
-
 // WithTableNameString returns a logger with a table name string provided in the logging context.
 func (l *Log) WithTableNameString(t string) *Log {
 	return &Log{l.With("table name", t)}
+}
+
+// WithTableName returns a logger with a table namespaced name provided in the logging context.
+func (l *Log) WithTableName(n message.NamespacedName) *Log {
+	return l.WithTableNameString(n.String())
 }
 
 // WithReplicationMessage returns a logger with a replication message provided in the logging context.
@@ -80,23 +88,13 @@ func (l *Log) WithHint(template string, args ...interface{}) *Log {
 	return &Log{l.With("hint", fmt.Sprintf(template, args...))}
 }
 
-// NewLogger creates a new logger with a given name, either a development or production one.
-func NewLogger(name string, development bool) (*Log, error) {
-	var (
-		logger *zap.Logger
-		err    error
-	)
-
-	if development {
-		logger, err = zap.NewDevelopment()
-	} else {
-		logger, err = zap.NewProduction()
+// NewLogger creates a new logger with a given name and configuration
+func NewLogger(name string, cfg *LoggerConfig) (*Log, error) {
+	log, err := newCustomLogger(cfg)
+	if err != nil {
+		return nil, err
 	}
-	if err == nil {
-		return &Log{logger.Sugar().Named(name)}, nil
-	}
-
-	return nil, err
+	return &Log{log.Sugar().Named(name)}, err
 }
 
 // NewLoggerFrom creates a new logger from the existing one, adding a name and, optionally, arbitrary fields with values.
@@ -112,4 +110,64 @@ func NewLoggerFrom(existing *Log, name string, withFields ...interface{}) (resul
 // PrintMessageForDebug emits a log entry describing the current message received for debug purposes.
 func PrintMessageForDebug(prefix string, msg message.Message, currentLSN dbutils.LSN, log *Log) {
 	log.WithLSN(currentLSN).Debugf(prefix+" %T", msg)
+}
+
+// LevelFromString converts the textual logging level to the level that can be passed to zap.Config
+func LevelFromString(text string) (level zapcore.Level, err error) {
+	err = level.UnmarshalText([]byte(text))
+	return
+}
+
+// ValidateLogLevel verifies that the log level text corresponds to the valid log level
+func ValidateLogLevel(level string) error {
+	if level == "" {
+		return nil
+	}
+	if _, err := LevelFromString(level); err != nil {
+		return fmt.Errorf("%v, valid levels are debug, info, warn, error, fatal, dpanic and panic", err)
+	}
+	return nil
+
+}
+
+// DefaultLogConfig returns a default logging configuration
+func DefaultLogConfig() *LoggerConfig {
+	var (
+		showLocationByDefault = true
+	)
+	return &LoggerConfig{"", &showLocationByDefault, false}
+
+}
+
+// We need to make slight customization to the default zap development and production levels
+// Namely, avoid stack traces for Warn in development (too verbose for our usage of Warn),
+// allow customization of the default level and disable showing lines of code in the log output.
+func newCustomLogger(lc *LoggerConfig) (*zap.Logger, error) {
+	var (
+		cfg zap.Config
+	)
+	opts := make([]zap.Option, 0)
+
+	if lc.Development {
+		cfg = zap.NewDevelopmentConfig()
+	} else {
+		cfg = zap.NewProductionConfig()
+	}
+	// adjust the log level if necessary
+	if lc.Level != "" {
+		lv, err := LevelFromString(lc.Level)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Level = zap.NewAtomicLevelAt(lv)
+	}
+	// disable logging source line numbers if instructed.
+	if lc.Location != nil {
+		cfg.DisableCaller = !*lc.Location
+	}
+	// default development configuration sets stacktraces from WarnLevel, override it here
+	if lc.Development {
+		opts = append(opts, zap.AddStacktrace(zap.ErrorLevel))
+	}
+	return cfg.Build(opts...)
 }

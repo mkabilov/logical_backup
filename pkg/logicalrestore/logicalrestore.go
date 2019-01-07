@@ -46,14 +46,14 @@ type LogicalRestore struct {
 }
 
 // New constructs a new LogicalRestore instance.
-func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig, debug bool) (*LogicalRestore, error) {
+func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig, lc *logger.LoggerConfig) (*LogicalRestore, error) {
 	lr := &LogicalRestore{
 		ctx:            context.Background(),
 		baseDir:        dir,
 		cfg:            cfg,
 		NamespacedName: tbl,
 	}
-	if l, err := logger.NewLogger("logical restore", debug); err != nil {
+	if l, err := logger.NewLogger("logical restore", lc); err != nil {
 		return nil, err
 	} else {
 		lr.log = l

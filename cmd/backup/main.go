@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	configFile = flag.String("config", "config.yaml", "path to the config file")
-	version    = flag.Bool("version", false, "print version information")
-	debug      = flag.Bool("debug", false, "enable debug mode")
+	configFile  = flag.String("config", "config.yaml", "path to the config file")
+	version     = flag.Bool("version", false, "print version information")
+	development = flag.Bool("log-development", false, "enable development logging mode")
 
 	Version  string
 	Revision string
@@ -28,8 +28,8 @@ func buildInfo() string {
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "%s\n", buildInfo())
-		fmt.Fprintf(os.Stderr, "\nUsage:\n")
+		_, _ = fmt.Fprintf(os.Stderr, "%s\n", buildInfo())
+		_, _ = fmt.Fprintf(os.Stderr, "\nUsage:\n")
 		flag.PrintDefaults()
 	}
 
@@ -40,18 +40,18 @@ func main() {
 	}
 
 	if _, err := os.Stat(*configFile); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Config file %s does not exist", *configFile)
+		_, _ = fmt.Fprintf(os.Stderr, "Config file %s does not exist", *configFile)
 		os.Exit(1)
 	}
 
-	cfg, err := config.New(*configFile, *debug)
+	cfg, err := config.New(*configFile, *development)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not load config file: %v", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Could not load config file: %v", err)
 		os.Exit(1)
 	}
 	// Initialize the logger after we've resolved the debug flag but before its first usage at cfg.Print
-	if err := logger.InitGlobalLogger(*debug); err != nil {
-		fmt.Fprintf(os.Stderr, "Could not initialize global logger")
+	if err := logger.InitGlobalLogger(cfg.Log); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Could not initialize global logger")
 		os.Exit(1)
 	}
 
@@ -63,7 +63,7 @@ func main() {
 	}
 
 	if err := lb.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

@@ -33,6 +33,7 @@ type Config struct {
 	Debug                                  bool           `yaml:"debug"`
 }
 
+// New constructs a new Config instance.
 func New(filename string, debug bool) (*Config, error) {
 	var cfg Config
 

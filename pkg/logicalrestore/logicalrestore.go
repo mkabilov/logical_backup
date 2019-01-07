@@ -45,6 +45,7 @@ type LogicalRestore struct {
 	curLsn  dbutils.LSN
 }
 
+// New constructs a new LogicalRestore instance.
 func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig, debug bool) (*LogicalRestore, error) {
 	lr := &LogicalRestore{
 		ctx:            context.Background(),

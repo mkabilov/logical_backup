@@ -124,6 +124,7 @@ type TableBackup struct {
 	prom              promexporter.PrometheusExporterInterface
 }
 
+// New constructs a new TableBackup instance.
 func New(ctx context.Context, group *sync.WaitGroup,
 	cfg *config.Config, tbl message.NamespacedName,
 	oid dbutils.OID, dbCfg pgx.ConnConfig,

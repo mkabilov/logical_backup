@@ -15,8 +15,10 @@ type Log struct {
 	*zap.SugaredLogger
 }
 
+// G is a global package-level logger to use in the parts of the code where the specific logger is not defined
 var G *Log
 
+// InitGlobalLogger initializes the package-level logger. It should be called only once at start of the program.
 func InitGlobalLogger(debug bool, args ...interface{}) (err error) {
 	G, err = NewLogger("global", debug)
 	if err == nil && len(args) > 0 {
@@ -40,7 +42,7 @@ func (l *Log) WithLSN(lsn dbutils.LSN) *Log {
 	return l.WithCustomNamedLSN("LSN", lsn)
 }
 
-// WithCustomNamedLSN returns a logger with an OID provided in the logging context.
+// WithOID returns a logger with an OID provided in the logging context.
 func (l *Log) WithOID(oid dbutils.OID) *Log {
 	return &Log{l.With("OID", oid)}
 }
@@ -50,7 +52,7 @@ func (l *Log) WithTableName(n message.NamespacedName) *Log {
 	return &Log{l.With("table name", n.Sanitize())}
 }
 
-// WithTableName returns a logger with a table name string provided in the logging context.
+// WithTableNameString returns a logger with a table name string provided in the logging context.
 func (l *Log) WithTableNameString(t string) *Log {
 	return &Log{l.With("table name", t)}
 }
@@ -107,6 +109,7 @@ func NewLoggerFrom(existing *Log, name string, withFields ...interface{}) (resul
 	return
 }
 
+// PrintMessageForDebug emits a log entry describing the current message received for debug purposes.
 func PrintMessageForDebug(prefix string, msg message.Message, currentLSN dbutils.LSN, log *Log) {
 	log.WithLSN(currentLSN).Debugf(prefix+" %T", msg)
 }

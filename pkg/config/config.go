@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +43,11 @@ func New(filename string, developmentMode bool) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not open config file: %v", err)
 	}
-	defer fp.Close()
+	defer func() {
+		if err := fp.Close(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "error during deferred file close: %v", err)
+		}
+	}()
 
 	if err := yaml.NewDecoder(fp).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("could not decode config file: %v", err)
@@ -53,9 +58,15 @@ func New(filename string, developmentMode bool) (*Config, error) {
 	if cfg.PrometheusPort == 0 {
 		cfg.PrometheusPort = defaultPrometheusPort
 	}
+
+	defaultLoggerConfig := logger.DefaultLogConfig()
 	if cfg.Log == nil {
-		cfg.Log = logger.DefaultLogConfig()
+		cfg.Log = defaultLoggerConfig
 	}
+	if cfg.Log.Location == nil {
+		cfg.Log.Location = defaultLoggerConfig.Location
+	}
+
 	if developmentMode {
 		cfg.Log.Development = developmentMode
 	}
@@ -68,34 +79,26 @@ func New(filename string, developmentMode bool) (*Config, error) {
 }
 
 func (c Config) Print() {
-	ops := [][]string{
-		{"Staging directory", c.StagingDir},
-		{"Archive directory", c.ArchiveDir},
-		{"BackupThreshold", fmt.Sprintf("%d", c.BackupThreshold)},
-		{"DeltasPerFile", fmt.Sprintf("%d", c.DeltasPerFile)},
-		{"DB Connection String", fmt.Sprintf("%s@%s:%d/%s slot:%q publication:%q",
-			c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)},
-		{"Track New Tables", fmt.Sprintf("%t", c.TrackNewTables)},
-		{"Fsync", fmt.Sprintf("%t", c.Fsync)},
-		{"Log development mode", fmt.Sprintf("%t", c.Log.Development)},
-	}
+	pr := logger.PrintOption
 
 	if c.StagingDir == "" {
-		ops = ops[1:]
-		logger.G.Infof("No staging directory specified. Files will be written directly to the archive directory")
+		logger.G.Info("No staging directory specified. Files will be written directly to the archive directory")
+	} else {
+		pr("Staging directory", c.StagingDir)
 	}
+	pr("Archive directory", c.ArchiveDir)
+	pr("BackupThreshold", strconv.Itoa(c.BackupThreshold))
+	pr("DeltasPerFile", strconv.Itoa(c.DeltasPerFile))
+	pr("DB Connection String",
+		"%s@%s:%d/%s slot:%q publication:%q", c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)
+	pr("Track New Tables", strconv.FormatBool(c.TrackNewTables))
+	pr("Fsync", strconv.FormatBool(c.Fsync))
 	if c.ForceBasebackupAfterInactivityInterval > 0 {
-		ops = append(ops, []string{"Force new basebackup of a modified table after inactivity", fmt.Sprintf("%v", c.ForceBasebackupAfterInactivityInterval)})
+		pr("Force new backups of a modified table after inactivity", c.ForceBasebackupAfterInactivityInterval.String())
 	}
+	pr("Log development mode", strconv.FormatBool(c.Log.Development))
 	if c.Log.Level != "" {
-		ops = append(ops, []string{"Log level", strings.ToUpper(c.Log.Level)})
+		pr("Log level", strings.ToUpper(c.Log.Level))
 	}
-	if c.Log.Location != nil {
-		ops = append(ops, []string{"Log includes file location", fmt.Sprintf("%t", *c.Log.Location)})
-	}
-
-	for _, opt := range ops {
-		logger.G.With(opt[0], opt[1]).Info("option")
-	}
-
+	pr("Log includes file location", strconv.FormatBool(*c.Log.Location))
 }

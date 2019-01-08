@@ -112,6 +112,11 @@ func PrintMessageForDebug(prefix string, msg message.Message, currentLSN dbutils
 	log.WithLSN(currentLSN).Debugf(prefix+" %T", msg)
 }
 
+// PrintOption emits a log entry with the option name and value.
+func PrintOption(name, template string, args ...interface{}) {
+	G.With(name, fmt.Sprintf(template, args...)).Info("option")
+}
+
 // LevelFromString converts the textual logging level to the level that can be passed to zap.Config
 func LevelFromString(text string) (level zapcore.Level, err error) {
 	err = level.UnmarshalText([]byte(text))

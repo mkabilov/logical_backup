@@ -1,0 +1,13 @@
+sudo: required
+dist: xenial
+language: go
+go:
+  - "1.11.x"
+addons:
+  postgresql: 11
+env:
+  global:
+    - POSTGRESQL=11
+    - PGPORT=5433
+install: true
+script: cd test && ./test.sh

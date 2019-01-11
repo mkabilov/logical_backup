@@ -11,7 +11,4 @@ forceBasebackupAfterInactivityInterval: 24h
 archiverTimeout: 3h
 prometheusPort: 19999
 db:
-  host: 127.0.0.1
-  port: 5432
   database: lb_test1
-  user: postgres

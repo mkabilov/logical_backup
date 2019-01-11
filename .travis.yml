@@ -5,9 +5,18 @@ go:
   - "1.11.x"
 addons:
   postgresql: 11
+  apt:
+    packages:
+    - postgresql-11
+    - postgresql-client-11
 env:
   global:
     - POSTGRESQL=11
     - PGPORT=5433
+    - PGUSER=travis
+before_install:
+  # configure PostgreSQL for logical decoding
+  - "psql -d postgres -c 'ALTER SYSTEM SET wal_level TO logical'"
+  - "sudo systemctl restart postgresql@11-main"
 install: true
 script: cd test && ./test.sh

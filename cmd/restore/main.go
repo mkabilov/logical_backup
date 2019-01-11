@@ -51,6 +51,13 @@ func main() {
 		Host:     *pgHost,
 	}
 
+	// honor PGHOST, PGPORT and other libpq variables when set.
+	envConfig, err := pgx.ParseEnvLibpq()
+	if err != nil {
+		log.Fatalf("could not parse libpq environment variables: %v", err)
+	}
+	config = config.Merge(envConfig)
+
 	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
 	r := logicalrestore.New(tbl, *backupDir, config)
 

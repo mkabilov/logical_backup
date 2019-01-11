@@ -1,3 +1,4 @@
+[![Build Status](https://travis-ci.com/ikitiki/logical_backup.svg?branch=master)](https://travis-ci.com/ikitiki/logical_backup)
 ## Introduction
 
 The purpose of the Logical Backup Tool (LBT) is to create a continuous

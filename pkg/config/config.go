@@ -45,13 +45,21 @@ func New(filename string, developmentMode bool) (*Config, error) {
 	}
 	defer func() {
 		if err := fp.Close(); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "error during deferred file close: %v", err)
+			fmt.Printf("could not close file: %v", err)
 		}
 	}()
 
 	if err := yaml.NewDecoder(fp).Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("could not decode config file: %v", err)
 	}
+
+	// honor PGHOST, PGPORT and other libpq variables when set.
+	envConfig, err := pgx.ParseEnvLibpq()
+	if err != nil {
+		return nil, fmt.Errorf("could not parse libpq environment variables: %v", err)
+	}
+	cfg.DB = cfg.DB.Merge(envConfig)
+
 	// forcing backups with sub-minute inactivity period makes no sense.
 	cfg.ForceBasebackupAfterInactivityInterval = cfg.ForceBasebackupAfterInactivityInterval.Truncate(time.Minute)
 

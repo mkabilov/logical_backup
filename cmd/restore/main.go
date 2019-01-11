@@ -81,9 +81,18 @@ func main() {
 		Host:     *pgHost,
 	}
 
-	r, err := logicalrestore.New(tbl, *backupDir, config, lc)
+	// honor PGHOST, PGPORT and other libpq variables when set.
+	envConfig, err := pgx.ParseEnvLibpq()
 	if err != nil {
-		logger.G.WithError(err).Fatalf("could not create backup logger")
+		log.Fatalf("could not parse libpq environment variables: %v", err)
+	}
+	config = config.Merge(envConfig)
+
+	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
+	
+  r, err := logicalrestore.New(tbl, *backupDir, config, lc)
+	if err != nil {
+		logger.G.WithError(err).Fatalf("could not initialize restore structure")
 	}
 
 	if err := r.Restore(); err != nil {

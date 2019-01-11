@@ -62,8 +62,8 @@ func makeLoggerConfig() *logger.LoggerConfig {
 func main() {
 
 	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
-	lc := makeLoggerConfig()
 
+	lc := makeLoggerConfig()
 	if err := logger.InitGlobalLogger(lc, "table to restore", tbl.String()); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Could not initialize global logger")
 		os.Exit(1)
@@ -84,18 +84,16 @@ func main() {
 	// honor PGHOST, PGPORT and other libpq variables when set.
 	envConfig, err := pgx.ParseEnvLibpq()
 	if err != nil {
-		log.Fatalf("could not parse libpq environment variables: %v", err)
+		logger.G.WithError(err).Fatal("could not parse libpq environment variables: %v")
 	}
 	config = config.Merge(envConfig)
 
-	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
-	
-  r, err := logicalrestore.New(tbl, *backupDir, config, lc)
+	r, err := logicalrestore.New(tbl, *backupDir, config, lc)
 	if err != nil {
-		logger.G.WithError(err).Fatalf("could not initialize restore structure")
+		logger.G.WithError(err).Fatal("could not initialize restore structure")
 	}
 
 	if err := r.Restore(); err != nil {
-		logger.G.WithError(err).Fatalf("could not restore table")
+		logger.G.WithError(err).Fatal("could not restore table")
 	}
 }

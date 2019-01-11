@@ -12,3 +12,7 @@ archiverTimeout: 3h
 prometheusPort: 19999
 db:
   database: lb_test1
+log:
+  development: false
+  level: info
+  location: true

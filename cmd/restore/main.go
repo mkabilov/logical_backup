@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx"
 
+	"github.com/ikitiki/logical_backup/pkg/logger"
 	"github.com/ikitiki/logical_backup/pkg/logicalrestore"
 	"github.com/ikitiki/logical_backup/pkg/message"
 )
@@ -15,6 +16,8 @@ var (
 	pgUser, pgPass, pgHost, pgDbname              *string
 	targetTable, backupDir, tableName, schemaName *string
 	pgPort                                        *uint
+	logDevelopment, logShowLocation               *bool
+	logLevel                                      *string
 )
 
 func init() {
@@ -29,6 +32,9 @@ func init() {
 	schemaName = flag.String("schema", "public", "Schema name")
 	targetTable = flag.String("target-table", "", "Target table name (optional)")
 	backupDir = flag.String("backup-dir", "", "Backups dir")
+	logDevelopment = flag.Bool("log-development", false, "Enable development logging mode")
+	logLevel = flag.String("log-level", "", "Set log level")
+	logShowLocation = flag.Bool("log-location", true, "Show log location")
 
 	flag.Parse()
 
@@ -38,7 +44,30 @@ func init() {
 	}
 }
 
+func makeLoggerConfig() *logger.LoggerConfig {
+	lc := logger.DefaultLogConfig()
+	lc.Development = *logDevelopment
+	lc.Location = logShowLocation
+
+	if *logLevel != "" {
+		if err := logger.ValidateLogLevel(*logLevel); err != nil {
+			log.Fatal(err)
+		}
+		lc.Level = *logLevel
+	}
+	return lc
+}
+
 func main() {
+
+	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
+
+	lc := makeLoggerConfig()
+	if err := logger.InitGlobalLogger(lc, "table to restore", tbl.String()); err != nil {
+		log.Fatal("Could not initialize global logger: %v", err)
+		os.Exit(1)
+	}
+
 	if *targetTable != "" {
 		log.Printf("restoring into %v", targetTable)
 	}
@@ -58,7 +87,6 @@ func main() {
 	}
 	config = config.Merge(envConfig)
 
-	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
 	r := logicalrestore.New(tbl, *backupDir, config)
 
 	if err := r.Restore(); err != nil {

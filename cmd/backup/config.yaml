@@ -16,4 +16,7 @@ db:
   port: 5432
   database: postgres
   user: postgres
-
+log:
+  development: false
+  level: info
+  location: true

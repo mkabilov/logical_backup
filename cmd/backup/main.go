@@ -8,12 +8,14 @@ import (
 	"runtime"
 
 	"github.com/ikitiki/logical_backup/pkg/config"
+	"github.com/ikitiki/logical_backup/pkg/logger"
 	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
 )
 
 var (
-	configFile = flag.String("config", "config.yaml", "path to the config file")
-	version    = flag.Bool("version", false, "Print version information")
+	configFile     = flag.String("config", "config.yaml", "path to the config file")
+	version        = flag.Bool("version", false, "Print version information")
+	logDevelopment = flag.Bool("log-development", false, "enable development logging mode")
 
 	Version  string
 	Revision string
@@ -43,9 +45,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg, err := config.New(*configFile)
+	cfg, err := config.New(*configFile, *logDevelopment)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not load config file: %v", err)
+		os.Exit(1)
+	}
+
+	// Initialize the logger after we've resolved the debug flag but before its first usage at cfg.Print
+	if err := logger.InitGlobalLogger(cfg.Log); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Could not initialize global logger")
 		os.Exit(1)
 	}
 

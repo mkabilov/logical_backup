@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
+
+	"github.com/ikitiki/logical_backup/pkg/logger"
 )
 
 const (
@@ -15,23 +17,24 @@ const (
 )
 
 type Config struct {
-	DB                                     pgx.ConnConfig `yaml:"db"`
-	SlotName                               string         `yaml:"slotname"`
-	PublicationName                        string         `yaml:"publication"`
-	TrackNewTables                         bool           `yaml:"trackNewTables"`
-	DeltasPerFile                          int            `yaml:"deltasPerFile"`
-	BackupThreshold                        int            `yaml:"backupThreshold"`
-	ConcurrentBasebackups                  int            `yaml:"concurrentBasebackups"`
-	InitialBasebackup                      bool           `yaml:"initialBasebackup"`
-	Fsync                                  bool           `yaml:"fsync"`
-	StagingDir                             string         `yaml:"StagingDir"`
-	ArchiveDir                             string         `yaml:"archiveDir"`
-	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
-	ArchiverTimeout                        time.Duration  `yaml:"archiverTimeout"`
-	PrometheusPort                         int            `yaml:"prometheusPort"`
+	DB                                     pgx.ConnConfig       `yaml:"db"`
+	SlotName                               string               `yaml:"slotname"`
+	PublicationName                        string               `yaml:"publication"`
+	TrackNewTables                         bool                 `yaml:"trackNewTables"`
+	DeltasPerFile                          int                  `yaml:"deltasPerFile"`
+	BackupThreshold                        int                  `yaml:"backupThreshold"`
+	ConcurrentBasebackups                  int                  `yaml:"concurrentBasebackups"`
+	InitialBasebackup                      bool                 `yaml:"initialBasebackup"`
+	Fsync                                  bool                 `yaml:"fsync"`
+	StagingDir                             string               `yaml:"StagingDir"`
+	ArchiveDir                             string               `yaml:"archiveDir"`
+	ForceBasebackupAfterInactivityInterval time.Duration        `yaml:"forceBasebackupAfterInactivityInterval"`
+	ArchiverTimeout                        time.Duration        `yaml:"archiverTimeout"`
+	PrometheusPort                         int                  `yaml:"prometheusPort"`
+	Log                                    *logger.LoggerConfig `yaml:"log"`
 }
 
-func New(filename string) (*Config, error) {
+func New(filename string, developmentMode bool) (*Config, error) {
 	var cfg Config
 
 	fp, err := os.Open(filename)
@@ -60,6 +63,22 @@ func New(filename string) (*Config, error) {
 
 	if cfg.PrometheusPort == 0 {
 		cfg.PrometheusPort = defaultPrometheusPort
+	}
+
+	defaultLoggerConfig := logger.DefaultLogConfig()
+	if cfg.Log == nil {
+		cfg.Log = defaultLoggerConfig
+	}
+	if cfg.Log.Location == nil {
+		cfg.Log.Location = defaultLoggerConfig.Location
+	}
+
+	if developmentMode {
+		cfg.Log.Development = developmentMode
+	}
+
+	if err := logger.ValidateLogLevel(cfg.Log.Level); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil

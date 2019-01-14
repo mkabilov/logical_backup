@@ -34,6 +34,9 @@ type Config struct {
 	Log                                    *logger.LoggerConfig `yaml:"log"`
 }
 
+// New returns a new config structure, filled-in from the passed filename.
+// developmentMode enables development mode logging, overriding file-based
+// settings.
 func New(filename string, developmentMode bool) (*Config, error) {
 	var cfg Config
 
@@ -84,6 +87,7 @@ func New(filename string, developmentMode bool) (*Config, error) {
 	return &cfg, nil
 }
 
+// Print outputs the actual configuration.
 func (c Config) Print() {
 	if c.StagingDir != "" {
 		log.Printf("Staging directory: %q", c.StagingDir)

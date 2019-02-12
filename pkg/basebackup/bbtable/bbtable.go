@@ -200,16 +200,11 @@ func (t *tableBasebackup) connect() error {
 	return nil
 }
 
-// Basebackup performs base backup of the table
-func (t *tableBasebackup) Basebackup() error {
-	if err := t.connect(); err != nil {
-		return fmt.Errorf("could not connect to db: %v", err)
-	}
-
+func (t *tableBasebackup) saveDumpInfo() (string, error) {
 	tempInfoFilepath := path.Join(t.dir, BasebackupInfoFilename+".new")
 	if _, err := os.Stat(tempInfoFilepath); !os.IsNotExist(err) {
 		if err != nil {
-			return fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
+			return "", fmt.Errorf("could not stat %q: %v", tempInfoFilepath, err)
 		}
 
 		if err := os.Remove(tempInfoFilepath); err != nil {
@@ -219,24 +214,41 @@ func (t *tableBasebackup) Basebackup() error {
 
 	infoFp, err := os.OpenFile(tempInfoFilepath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("could not create info file: %v", err)
+		return "", fmt.Errorf("could not create info file: %v", err)
 	}
-	defer func() {
-		infoFp.Close()
-		os.Remove(tempInfoFilepath)
-	}()
+	defer infoFp.Close()
 
+	if err := yaml.NewEncoder(infoFp).Encode(t.DumpInfo); err != nil {
+		return "", err
+	}
+
+	return tempInfoFilepath, nil
+}
+
+func (t *tableBasebackup) saveDump() (string, error) {
 	tempDumpFilepath := path.Join(t.dir, BasebackupFilename+".new")
 	if _, err := os.Stat(tempDumpFilepath); !os.IsNotExist(err) {
 		if err != nil {
-			return fmt.Errorf("could not stat %q: %v", tempDumpFilepath, err)
+			return "", fmt.Errorf("could not stat %q: %v", tempDumpFilepath, err)
 		}
 
 		if err := os.Remove(tempDumpFilepath); err != nil {
 			log.Printf("could not delete old temp info file: %v", err)
 		}
 	}
-	defer os.Remove(tempDumpFilepath)
+
+	if err := t.copyDump(tempDumpFilepath); err != nil {
+		return "", err
+	}
+
+	return tempDumpFilepath, nil
+}
+
+// Basebackup performs base backup of the table
+func (t *tableBasebackup) Basebackup() error {
+	if err := t.connect(); err != nil {
+		return fmt.Errorf("could not connect to db: %v", err)
+	}
 
 	tx, err := t.conn.BeginEx(context.Background(), &pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
@@ -273,7 +285,8 @@ func (t *tableBasebackup) Basebackup() error {
 		return fmt.Errorf("could not fetch relation info: %v", err)
 	}
 
-	if err := t.copyDump(tempDumpFilepath); err != nil {
+	tempDumpFilepath, err := t.saveDump()
+	if err != nil {
 		t.rollback()
 		return fmt.Errorf("could not dump table: %v", err)
 	}
@@ -288,7 +301,9 @@ func (t *tableBasebackup) Basebackup() error {
 	}
 
 	t.BackupDuration = time.Since(t.CreateDate)
-	if err := yaml.NewEncoder(infoFp).Encode(t.DumpInfo); err != nil {
+
+	tempInfoFilepath, err := t.saveDumpInfo()
+	if err != nil {
 		return fmt.Errorf("could not save info file: %v", err)
 	}
 
@@ -297,7 +312,7 @@ func (t *tableBasebackup) Basebackup() error {
 		return fmt.Errorf("could not move dump info file: %v", err)
 	}
 
-	log.Printf("snapshotLSN: %v", t.StartLSN)
+	log.Printf("SnapshotLSN: %v", t.StartLSN)
 	log.Printf("It took %v to basebackup", t.BackupDuration)
 
 	return nil

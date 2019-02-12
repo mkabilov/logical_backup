@@ -197,17 +197,19 @@ func (r *logicalRestore) execSQL(sql string) error {
 	return nil
 }
 
+func (r *logicalRestore) skipLSN() bool {
+	return r.curLSN.IsValid() && r.curLSN <= r.startLSN
+}
+
 func (r *logicalRestore) applyMessage(msg message.Message) (sql string, err error) {
-	if _, ok := msg.(message.Begin); !ok {
-		if r.curLSN.IsValid() && r.curLSN <= r.startLSN {
-			return
-		}
+	if _, ok := msg.(message.Begin); !ok && r.skipLSN() {
+		return
 	}
 
 	switch v := msg.(type) {
 	case message.Begin:
 		r.curLSN = v.FinalLSN
-		if r.curLSN <= r.startLSN {
+		if r.skipLSN() {
 			return
 		}
 

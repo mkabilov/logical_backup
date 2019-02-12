@@ -208,12 +208,10 @@ func (b *logicalBackup) flushLSN() dbutils.LSN {
 }
 
 func (b *logicalBackup) filePath(parts ...string) string {
-	var path string
-
+	path := b.cfg.ArchiveDir
 	if b.cfg.StagingDir != "" {
 		path = b.cfg.StagingDir
 	}
-	path = b.cfg.ArchiveDir
 
 	for _, part := range parts {
 		path = filepath.Join(path, part)

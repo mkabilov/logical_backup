@@ -1,4 +1,6 @@
 [![Build Status](https://travis-ci.com/ikitiki/logical_backup.svg?branch=master)](https://travis-ci.com/ikitiki/logical_backup)
+### PostgreSQL logical backup tool
+
 ## Introduction
 
 The purpose of the Logical Backup Tool (LBT) is to create a continuous

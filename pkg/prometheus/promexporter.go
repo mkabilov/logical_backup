@@ -12,6 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type MetricsKind uint8
+
 const (
 	prometheusNamespace = "lbt"
 
@@ -36,19 +38,6 @@ const (
 	TableNameLabel   = "table_name"
 	TableOIDLabel    = "table_oid"
 
-	MessageTypeInsert   = "insert"
-	MessageTypeUpdate   = "update"
-	MessageTypeDelete   = "delete"
-	MessageTypeRelation = "relation"
-	MessageTypeBegin    = "begin"
-	MessageTypeCommit   = "commit"
-	MessageTypeTypeInfo = "type"
-	MessageTypeUnknown  = "unknown"
-)
-
-type MetricsKind uint8
-
-const (
 	MetricsCounter MetricsKind = iota
 	MetricsCounterVector
 	MetricsGauge
@@ -67,7 +56,7 @@ type PrometheusExporter struct {
 	port    int
 }
 
-type PrometheusExporterInterface interface {
+type PromInterface interface {
 	RegisterMetricsItem(item *MetricsToRegister) error
 	Inc(name string, labelValues []string) error
 	Add(name string, addition float64, labelValues []string) error
@@ -219,7 +208,8 @@ func (pe *PrometheusExporter) Run(ctx context.Context, wait *sync.WaitGroup) {
 		if err := srv.Close(); err != nil {
 			log.Printf("error while closing prometheus connections: %v", err)
 		}
-		log.Printf("prometheus connection closed")
+
+		log.Printf("prometheus http server shut down")
 	}()
 
 	// TODO: avoid exposting noisy metrics about the prometheus itself

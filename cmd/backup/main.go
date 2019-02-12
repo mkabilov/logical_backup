@@ -15,8 +15,8 @@ var (
 	configFile = flag.String("config", "config.yaml", "path to the config file")
 	version    = flag.Bool("version", false, "Print version information")
 
-	Version  string
-	Revision string
+	Version  = "devel"
+	Revision = "devel"
 
 	GoVersion = runtime.Version()
 )

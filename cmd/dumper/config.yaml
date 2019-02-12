@@ -1,13 +1,13 @@
-messagesPerDelta: 10000
+tempDir: /tmp/staging
+deltasPerFile: 10000
 backupThreshold: 100
 concurrentBasebackups: 5
 trackNewTables: true
 slotname: myslot
 publication: mypub
-initialBasebackup: true
+initialBasebackup: false
 fsync: true
 archiveDir: /tmp/final
-stagingDir: /tmp/staging
 forceBasebackupAfterInactivityInterval: 24h
 archiverTimeout: 3h
 prometheusPort: 19999
@@ -16,3 +16,4 @@ db:
     port: 5432
     database: postgres
     user: postgres
+

@@ -7,7 +7,13 @@ import (
 
 	"github.com/jackc/pgx"
 
-	"github.com/ikitiki/logical_backup/pkg/dbutils"
+	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+)
+
+type (
+	MType           int
+	ReplicaIdentity uint8
+	TupleKind       uint8
 )
 
 const (
@@ -16,56 +22,54 @@ const (
 	ReplicaIdentityIndex                   = 'i'
 	ReplicaIdentityFull                    = 'f'
 
-	NullValue    TupleKind = 'n' // null
-	ToastedValue           = 'u' // unchanged column
-	TextValue              = 't' // text formatted value
+	TupleNull    TupleKind = 'n' // Identifies the data as NULL value.
+	TupleToasted           = 'u' // Identifies unchanged TOASTed value (the actual value is not sent).
+	TupleText              = 't' // Identifies the data as text formatted value.
+
+	MsgInsert MType = iota
+	MsgUpdate
+	MsgDelete
+	MsgBegin
+	MsgCommit
+	MsgRelation
+	MsgType
+	MsgOrigin
+	MsgTruncate
 )
 
-var replicaIdentities = map[ReplicaIdentity]string{
-	ReplicaIdentityDefault: "default",
-	ReplicaIdentityIndex:   "index",
-	ReplicaIdentityNothing: "nothing",
-	ReplicaIdentityFull:    "full",
-}
+var (
+	replicaIdentities = map[ReplicaIdentity]string{
+		ReplicaIdentityDefault: "default",
+		ReplicaIdentityIndex:   "index",
+		ReplicaIdentityNothing: "nothing",
+		ReplicaIdentityFull:    "full",
+	}
 
-type ReplicaIdentity uint8
-
-type TupleKind uint8
+	typeNames = map[MType]string{
+		MsgBegin:    "begin",
+		MsgRelation: "relation",
+		MsgUpdate:   "update",
+		MsgInsert:   "insert",
+		MsgDelete:   "delete",
+		MsgCommit:   "commit",
+		MsgOrigin:   "origin",
+		MsgType:     "type",
+		MsgTruncate: "truncate",
+	}
+)
 
 type DumpInfo struct {
-	StartLSN       string    `yaml:"StartLSN"`
-	CreateDate     time.Time `yaml:"CreateDate"`
-	Relation       Relation  `yaml:"Relation"`
-	BackupDuration float64   `yaml:"BackupDuration"`
+	StartLSN       dbutils.LSN   `yaml:"StartLSN"`
+	CreateDate     time.Time     `yaml:"CreateDate"`
+	Relation       Relation      `yaml:"Relation"`
+	BackupDuration time.Duration `yaml:"BackupDuration"`
 }
 
 type Message interface {
 	fmt.Stringer
 
-	MsgType() string
-}
-
-type DeltaMessage interface {
-	GetSQL() string
-	GetLSN() dbutils.LSN
-	GetRelationOID() dbutils.OID
-	GetTxId() int32
-}
-
-type DDLMessage struct {
-	LastLSN     dbutils.LSN
-	TxId        int32
-	RelationOID dbutils.OID
-	Origin      string
-	Query       string
-}
-
-type DMLMessage struct {
-	LastLSN     dbutils.LSN
-	TxId        int32
-	RelationOID dbutils.OID
-	Origin      string
-	Query       string
+	MsgType() MType
+	RawData() []byte
 }
 
 type NamespacedName struct {
@@ -74,11 +78,10 @@ type NamespacedName struct {
 }
 
 type Column struct {
-	IsKey         bool        `yaml:"IsKey"`         // column as part of the key.
-	Name          string      `yaml:"Name"`          // Name of the column.
-	TypeOID       dbutils.OID `yaml:"OID"`           // OID of the column's data type.
-	Mode          int32       `yaml:"Mode"`          // OID modifier of the column (atttypmod).
-	FormattedType string      `yaml:"FormattedType"` //
+	IsKey   bool        `yaml:"IsKey"` // column as part of the key.
+	Name    string      `yaml:"Name"`  // Name of the column.
+	TypeOID dbutils.OID `yaml:"OID"`   // OID of the column's data type.
+	Mode    int32       `yaml:"Mode"`  // OID modifier of the column (atttypmod).
 }
 
 type Tuple struct {
@@ -126,7 +129,7 @@ type Insert struct {
 
 type Update struct {
 	Raw         []byte
-	RelationOID dbutils.OID /// OID of the relation corresponding to the OID in the relation message.
+	RelationOID dbutils.OID // OID of the relation corresponding to the OID in the relation message.
 	IsKey       bool        // OldRow contains columns which are part of REPLICA IDENTITY index.
 	IsOld       bool        // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
 	IsNew       bool        // Identifies tuple as a new tuple.
@@ -158,23 +161,47 @@ type Type struct {
 	OID dbutils.OID // OID of the data type
 }
 
-func (Begin) MsgType() string    { return "begin" }
-func (Relation) MsgType() string { return "relation" }
-func (Update) MsgType() string   { return "update" }
-func (Insert) MsgType() string   { return "insert" }
-func (Delete) MsgType() string   { return "delete" }
-func (Commit) MsgType() string   { return "commit" }
-func (Origin) MsgType() string   { return "origin" }
-func (Type) MsgType() string     { return "type" }
-func (Truncate) MsgType() string { return "truncate" }
+type queryRunner interface {
+	QueryRow(sql string, args ...interface{}) *pgx.Row
+	Query(sql string, args ...interface{}) (*pgx.Rows, error)
+}
+
+func (t MType) String() string {
+	str, ok := typeNames[t]
+	if !ok {
+		return "unknown"
+	}
+
+	return str
+}
+
+func (Begin) MsgType() MType    { return MsgBegin }
+func (Relation) MsgType() MType { return MsgRelation }
+func (Update) MsgType() MType   { return MsgUpdate }
+func (Insert) MsgType() MType   { return MsgInsert }
+func (Delete) MsgType() MType   { return MsgDelete }
+func (Commit) MsgType() MType   { return MsgCommit }
+func (Origin) MsgType() MType   { return MsgOrigin }
+func (Type) MsgType() MType     { return MsgType }
+func (Truncate) MsgType() MType { return MsgTruncate }
+
+func (m Begin) RawData() []byte    { return m.Raw }
+func (m Relation) RawData() []byte { return m.Raw }
+func (m Update) RawData() []byte   { return m.Raw }
+func (m Insert) RawData() []byte   { return m.Raw }
+func (m Delete) RawData() []byte   { return m.Raw }
+func (m Commit) RawData() []byte   { return m.Raw }
+func (m Origin) RawData() []byte   { return m.Raw }
+func (m Type) RawData() []byte     { return m.Raw }
+func (m Truncate) RawData() []byte { return m.Raw }
 
 func (t Tuple) String() string {
 	switch t.Kind {
-	case TextValue:
+	case TupleText:
 		return dbutils.QuoteLiteral(string(t.Value))
-	case NullValue:
+	case TupleNull:
 		return "null"
-	case ToastedValue:
+	case TupleToasted:
 		return "[toasted value]"
 	}
 
@@ -295,7 +322,7 @@ func (m Delete) String() string {
 }
 
 func (m Commit) String() string {
-	return fmt.Sprintf("LSN:%s Timestamp:%v TxLSN:%s",
+	return fmt.Sprintf("LSN:%s Timestamp:%v TxEndLSN:%s",
 		m.LSN, m.Timestamp.Format(time.RFC3339), m.TransactionLSN)
 }
 
@@ -340,9 +367,9 @@ func (ins Insert) SQL(rel Relation) string {
 	names := make([]string, 0)
 	for i, v := range rel.Columns {
 		names = append(names, pgx.Identifier{v.Name}.Sanitize())
-		if ins.NewRow[i].Kind == TextValue {
+		if ins.NewRow[i].Kind == TupleText {
 			values = append(values, dbutils.QuoteLiteral(string(ins.NewRow[i].Value)))
-		} else if ins.NewRow[i].Kind == NullValue {
+		} else if ins.NewRow[i].Kind == TupleNull {
 			values = append(values, "null")
 		}
 	}
@@ -358,28 +385,28 @@ func (upd Update) SQL(rel Relation) string {
 	cond := make([]string, 0)
 
 	for i, v := range rel.Columns {
-		if upd.NewRow[i].Kind == NullValue {
+		if upd.NewRow[i].Kind == TupleNull {
 			values = append(values, fmt.Sprintf("%s = null", pgx.Identifier{string(v.Name)}.Sanitize()))
-		} else if upd.NewRow[i].Kind == TextValue {
+		} else if upd.NewRow[i].Kind == TupleText {
 			values = append(values, fmt.Sprintf("%s = %s",
 				pgx.Identifier{string(v.Name)}.Sanitize(),
 				dbutils.QuoteLiteral(string(upd.NewRow[i].Value))))
 		}
 
 		if upd.IsKey || upd.IsOld {
-			if upd.OldRow[i].Kind == TextValue {
+			if upd.OldRow[i].Kind == TupleText {
 				cond = append(cond, fmt.Sprintf("%s = %s",
 					pgx.Identifier{string(v.Name)}.Sanitize(),
 					dbutils.QuoteLiteral(string(upd.OldRow[i].Value))))
-			} else if upd.OldRow[i].Kind == NullValue {
+			} else if upd.OldRow[i].Kind == TupleNull {
 				cond = append(cond, fmt.Sprintf("%s is null", pgx.Identifier{string(v.Name)}.Sanitize()))
 			}
 		} else {
-			if upd.NewRow[i].Kind == TextValue && v.IsKey {
+			if upd.NewRow[i].Kind == TupleText && v.IsKey {
 				cond = append(cond, fmt.Sprintf("%s = %s",
 					pgx.Identifier{string(v.Name)}.Sanitize(),
 					dbutils.QuoteLiteral(string(upd.NewRow[i].Value))))
-			} else if upd.NewRow[i].Kind == NullValue && v.IsKey {
+			} else if upd.NewRow[i].Kind == TupleNull && v.IsKey {
 				cond = append(cond, fmt.Sprintf("%s is null", pgx.Identifier{string(v.Name)}.Sanitize()))
 			}
 		}
@@ -397,7 +424,7 @@ func (upd Update) SQL(rel Relation) string {
 func (del Delete) SQL(rel Relation) string {
 	cond := make([]string, 0)
 	for i, v := range rel.Columns {
-		if del.OldRow[i].Kind == TextValue {
+		if del.OldRow[i].Kind == TupleText {
 			cond = append(cond, fmt.Sprintf("%s = %s",
 				pgx.Identifier{string(v.Name)}.Sanitize(),
 				dbutils.QuoteLiteral(string(del.OldRow[i].Value))))
@@ -469,38 +496,6 @@ func (rel Relation) SQL(oldRel Relation) string {
 	return strings.Join(sqlCommands, " ")
 }
 
-func (m DMLMessage) GetSQL() string {
-	return m.Query
-}
-
-func (m DMLMessage) GetLSN() dbutils.LSN {
-	return m.LastLSN
-}
-
-func (m DMLMessage) GetRelationOID() dbutils.OID {
-	return m.RelationOID
-}
-
-func (m DMLMessage) GetTxId() int32 {
-	return m.TxId
-}
-
-func (m DDLMessage) GetSQL() string {
-	return m.Query
-}
-
-func (m DDLMessage) GetLSN() dbutils.LSN {
-	return m.LastLSN
-}
-
-func (m DDLMessage) GetRelationOID() dbutils.OID {
-	return m.RelationOID
-}
-
-func (m DDLMessage) GetTxId() int32 {
-	return m.TxId
-}
-
 func (r ReplicaIdentity) String() string {
 	if name, ok := replicaIdentities[r]; !ok {
 		return replicaIdentities[ReplicaIdentityDefault]
@@ -531,11 +526,11 @@ func (r *ReplicaIdentity) UnmarshalYAML(unmarshal func(interface{}) error) error
 
 func (t TupleKind) String() string {
 	switch t {
-	case NullValue:
+	case TupleNull:
 		return "null"
-	case ToastedValue:
+	case TupleToasted:
 		return "toasted"
-	case TextValue:
+	case TupleText:
 		return "text"
 	}
 
@@ -559,7 +554,7 @@ func (rel Relation) Structure() string {
 
 	cols := make([]string, 0)
 	for _, c := range rel.Columns {
-		cols = append(cols, fmt.Sprintf("%s(%s)", c.Name, c.FormattedType))
+		cols = append(cols, fmt.Sprintf("%s(%v)", c.Name, c.TypeOID))
 	}
 
 	if len(cols) > 0 {
@@ -567,4 +562,115 @@ func (rel Relation) Structure() string {
 	}
 
 	return result
+}
+
+func (rel *Relation) fetchColumns(conn queryRunner) error {
+	var columns []Column
+
+	if rel.OID == dbutils.InvalidOID {
+		return fmt.Errorf("table has no oid")
+	}
+
+	// query taken from fetch_remote_table_info (src/backend/replication/logical/tablesync.c)
+	query := fmt.Sprintf(`
+	  SELECT a.attname,
+	       a.atttypid,
+	       a.atttypmod,
+	       coalesce(a.attnum = ANY(i.indkey), false)
+	  FROM pg_catalog.pg_attribute a
+	  LEFT JOIN pg_catalog.pg_index i
+	       ON (i.indexrelid = pg_get_replica_identity_index(%[1]d))
+	  WHERE a.attnum > 0::pg_catalog.int2
+	  AND NOT a.attisdropped
+	  AND a.attrelid = %[1]d
+      ORDER BY a.attnum`, rel.OID)
+
+	rows, err := conn.Query(query)
+	if err != nil {
+		return fmt.Errorf("could not execute query: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var column Column
+
+		if err := rows.Scan(&column.Name, &column.TypeOID, &column.Mode, &column.IsKey); err != nil {
+			return fmt.Errorf("could not scan: %v", err)
+		}
+
+		columns = append(columns, column)
+	}
+
+	rel.Columns = columns
+
+	return nil
+}
+
+// FetchByOID fetches relation info from the database by oid
+func (rel *Relation) FetchByOID(conn queryRunner, oid dbutils.OID) error {
+	var relreplident, tableName, schemaName string
+
+	row := conn.QueryRow(fmt.Sprintf(`select relnamespace::regnamespace::text, relname, relreplident::text from pg_class where oid = %d`, oid))
+	if err := row.Scan(&schemaName, &tableName, &relreplident); err != nil {
+		return fmt.Errorf("could not fetch replica identity: %v", err)
+	}
+	rel.Name = tableName
+	rel.Namespace = schemaName
+	rel.ReplicaIdentity = ReplicaIdentity(relreplident[0])
+	rel.OID = oid
+
+	if err := rel.fetchColumns(conn); err != nil {
+		return fmt.Errorf("could not fetch columns: %v", err)
+	}
+
+	return nil
+}
+
+// FetchByName fetches relation info from the database by name
+func (rel *Relation) FetchByName(conn queryRunner, tableName NamespacedName) error {
+	var (
+		relreplident string
+		oid          dbutils.OID
+	)
+
+	row := conn.QueryRow(fmt.Sprintf(`select oid, relreplident::text from pg_class where oid = '%s'::regclass::oid`, tableName.Sanitize()))
+	if err := row.Scan(&oid, &relreplident); err != nil {
+		return fmt.Errorf("could not fetch replica identity: %v", err)
+	}
+	rel.NamespacedName = tableName
+	rel.ReplicaIdentity = ReplicaIdentity(relreplident[0])
+	rel.OID = oid
+
+	if err := rel.fetchColumns(conn); err != nil {
+		return fmt.Errorf("could not fetch columns: %v", err)
+	}
+
+	return nil
+}
+
+// Equals checks if rel2 is the same as rel. except for Raw field
+func (rel *Relation) Equals(rel2 *Relation) bool {
+	if rel.OID != rel2.OID {
+		return false
+	}
+
+	if rel.NamespacedName != rel2.NamespacedName {
+		return false
+	}
+
+	if rel.ReplicaIdentity != rel2.ReplicaIdentity {
+		return false
+	}
+
+	if len(rel.Columns) != len(rel2.Columns) {
+		return false
+	}
+
+	for i := range rel.Columns {
+		if rel.Columns[i] != rel2.Columns[i] {
+			return false
+		}
+	}
+
+	return true
 }

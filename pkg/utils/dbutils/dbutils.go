@@ -3,63 +3,20 @@ package dbutils
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"fmt"
 	"log"
 
 	"github.com/jackc/pgx"
-	"github.com/jackc/pgx/pgtype"
-)
-
-type (
-	LSN uint64
-	OID uint32
 )
 
 const (
-	OutputPlugin    = "pgoutput"
-	logicalSlotType = "logical"
+	// OutputPlugin contains logical decoder plugin name
+	OutputPlugin = "pgoutput"
 
-	InvalidOID OID = 0
-	InvalidLSN LSN = 0
+	logicalSlotType = "logical"
 )
 
-func (l LSN) String() string {
-	return pgx.FormatLSN(uint64(l))
-}
-
-func (l *LSN) Parse(lsn string) error {
-	tmp, err := pgx.ParseLSN(lsn)
-	if err != nil {
-		return err
-
-	}
-	*l = (LSN)(tmp)
-	return nil
-}
-
-func (l LSN) IsValid() bool {
-	return l != InvalidLSN
-}
-
-func (o OID) String() string {
-	return fmt.Sprintf("%d", uint32(o))
-}
-
-// Scan implements the Scanner interface in order to allow pgx to read OID values from the DB.
-func (o *OID) Scan(src interface{}) error {
-	var result pgtype.OID
-	if err := result.Scan(src); err != nil {
-		return err
-	}
-	*o = OID(result)
-	return nil
-}
-
-func (o OID) Value() (driver.Value, error) {
-	return int64(o), nil
-}
-
+//QuoteLiteral quotes string literal
 func QuoteLiteral(str string) string {
 	needsEscapeChar := false
 	res := ""
@@ -88,6 +45,7 @@ func QuoteLiteral(str string) string {
 	}
 }
 
+// CreateMissingPublication creates missing publication
 func CreateMissingPublication(conn *pgx.Conn, publicationName string) error {
 	rows, err := conn.Query("select 1 from pg_publication where pubname = $1;", publicationName)
 	if err != nil {
@@ -112,6 +70,7 @@ func CreateMissingPublication(conn *pgx.Conn, publicationName string) error {
 	return nil
 }
 
+//GetSlotFlushLSN returns flush LSN of the existing replication slot
 func GetSlotFlushLSN(conn *pgx.Conn, slotName, dbName string) (LSN, error) {
 	var lsn LSN
 
@@ -148,8 +107,10 @@ func GetSlotFlushLSN(conn *pgx.Conn, slotName, dbName string) (LSN, error) {
 	return lsn, nil
 }
 
+//CreateSlot creates a slot
 func CreateSlot(conn *pgx.Conn, ctx context.Context, slotName string) (LSN, error) {
 	var strLSN sql.NullString
+
 	row := conn.QueryRowEx(ctx, "select lsn from pg_create_logical_replication_slot($1, $2)",
 		nil, slotName, OutputPlugin)
 

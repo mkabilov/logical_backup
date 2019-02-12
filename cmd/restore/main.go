@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -12,9 +13,17 @@ import (
 )
 
 var (
-	pgUser, pgPass, pgHost, pgDbname              *string
-	targetTable, backupDir, tableName, schemaName *string
-	pgPort                                        *uint
+	pgUser   *string
+	pgPass   *string
+	pgHost   *string
+	pgDbname *string
+	pgPort   *uint
+
+	targetTable *string
+	backupDir   *string
+	tableName   *string
+	schemaName  *string
+	truncate    *bool
 )
 
 func init() {
@@ -29,6 +38,7 @@ func init() {
 	schemaName = flag.String("schema", "public", "Schema name")
 	targetTable = flag.String("target-table", "", "Target table name (optional)")
 	backupDir = flag.String("backup-dir", "", "Backups dir")
+	truncate = flag.Bool("truncate", false, "Truncate table before restoring")
 
 	flag.Parse()
 
@@ -51,15 +61,14 @@ func main() {
 		Host:     *pgHost,
 	}
 
-	// honor PGHOST, PGPORT and other libpq variables when set.
-	envConfig, err := pgx.ParseEnvLibpq()
-	if err != nil {
+	if envConfig, err := pgx.ParseEnvLibpq(); err != nil {
 		log.Fatalf("could not parse libpq environment variables: %v", err)
+	} else {
+		config = config.Merge(envConfig)
 	}
-	config = config.Merge(envConfig)
 
 	tbl := message.NamespacedName{Namespace: *schemaName, Name: *tableName}
-	r := logicalrestore.New(tbl, *backupDir, config)
+	r := logicalrestore.New(context.Background(), tbl, *backupDir, *truncate, config)
 
 	if err := r.Restore(); err != nil {
 		log.Fatalf("could not restore table: %v", err)

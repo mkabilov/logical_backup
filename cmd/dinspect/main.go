@@ -1,21 +1,22 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
 	"strings"
 
-	"github.com/ikitiki/logical_backup/pkg/decoder"
+	"github.com/ikitiki/logical_backup/pkg/deltas"
 )
+
+const columnWidth = 10
 
 var (
 	filePaths []string
 
-	Version  string
-	Revision string
+	Version  = "devel"
+	Revision = "devel"
 
 	GoVersion = runtime.Version()
 )
@@ -34,45 +35,31 @@ func init() {
 	filePaths = os.Args[1:]
 }
 
+func dumpFile(filepath string) {
+	d := deltas.New("", false)
+	if err := d.Load(filepath); err != nil {
+		fmt.Fprintf(os.Stderr, "could not load file: %v\n", err)
+		os.Exit(1)
+	}
+
+	for {
+		msg, err := d.GetMessage()
+		if err == io.EOF {
+			break
+		}
+
+		msgType := msg.MsgType().String()
+		delimiter := strings.Repeat(" ", columnWidth-len(msgType))
+		fmt.Printf("%s:%s%s\n", msgType, delimiter, msg.String())
+	}
+
+	if err := d.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "could not close file: %v\n", err)
+	}
+}
+
 func main() {
 	for _, filePath := range filePaths {
-		fmt.Printf("reading %q segment file: \n\n", filePath)
-
-		fp, err := os.OpenFile(filePath, os.O_RDONLY, os.ModePerm)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not open file: %v\n", err)
-			os.Exit(1)
-		}
-		defer fp.Close()
-
-		lnBuf := make([]byte, 8)
-		for {
-			if n, err := fp.Read(lnBuf); err == io.EOF && n == 0 {
-				break
-			} else if err != nil || n != 8 {
-				fmt.Fprintf(os.Stderr, "could not read: %v\n", err)
-				os.Exit(1)
-			}
-
-			ln := binary.BigEndian.Uint64(lnBuf) - 8
-			dataBuf := make([]byte, ln)
-
-			if n, err := fp.Read(dataBuf); err == io.EOF && n == 0 {
-				break
-			} else if err != nil || uint64(n) != ln {
-				fmt.Fprintf(os.Stderr, "could not read %d bytes: %v", ln, err)
-				os.Exit(1)
-			}
-
-			msg, err := decoder.Parse(dataBuf)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "could not parse message: %v", err)
-				os.Exit(1)
-			}
-
-			msgType := msg.MsgType()
-			delimiter := strings.Repeat(" ", 10-len(msgType))
-			fmt.Printf("%s:%s%s\n", msgType, delimiter, msg.String())
-		}
+		dumpFile(filePath)
 	}
 }

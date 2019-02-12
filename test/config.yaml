@@ -1,4 +1,4 @@
-deltasPerFile: 10000
+messagesPerDelta: 10000
 backupThreshold: 100
 concurrentBasebackups: 5
 trackNewTables: true

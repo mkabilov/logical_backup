@@ -19,12 +19,12 @@ type Config struct {
 	SlotName                               string         `yaml:"slotname"`
 	PublicationName                        string         `yaml:"publication"`
 	TrackNewTables                         bool           `yaml:"trackNewTables"`
-	DeltasPerFile                          int            `yaml:"deltasPerFile"`
-	BackupThreshold                        int            `yaml:"backupThreshold"`
+	MessagesPerDelta                       uint32         `yaml:"messagesPerDelta"`
+	BackupThreshold                        uint           `yaml:"backupThreshold"`
 	ConcurrentBasebackups                  int            `yaml:"concurrentBasebackups"`
 	InitialBasebackup                      bool           `yaml:"initialBasebackup"`
 	Fsync                                  bool           `yaml:"fsync"`
-	StagingDir                             string         `yaml:"StagingDir"`
+	StagingDir                             string         `yaml:"stagingDir"`
 	ArchiveDir                             string         `yaml:"archiveDir"`
 	ForceBasebackupAfterInactivityInterval time.Duration  `yaml:"forceBasebackupAfterInactivityInterval"`
 	ArchiverTimeout                        time.Duration  `yaml:"archiverTimeout"`
@@ -58,6 +58,18 @@ func New(filename string) (*Config, error) {
 	// forcing backups with sub-minute inactivity period makes no sense.
 	cfg.ForceBasebackupAfterInactivityInterval = cfg.ForceBasebackupAfterInactivityInterval.Truncate(time.Minute)
 
+	if cfg.StagingDir == cfg.ArchiveDir {
+		cfg.StagingDir = ""
+	}
+
+	if cfg.MessagesPerDelta <= 0 {
+		return nil, fmt.Errorf("messagesPerDelta must be greater than 0")
+	}
+
+	if cfg.BackupThreshold <= 0 {
+		return nil, fmt.Errorf("backupThreshold must be greater than 0")
+	}
+
 	if cfg.PrometheusPort == 0 {
 		cfg.PrometheusPort = defaultPrometheusPort
 	}
@@ -74,7 +86,7 @@ func (c Config) Print() {
 
 	log.Printf("Archive directory: %q", c.ArchiveDir)
 	log.Printf("BackupThreshold: %v", c.BackupThreshold)
-	log.Printf("DeltasPerFile: %v", c.DeltasPerFile)
+	log.Printf("MessagesPerDelta: %v", c.MessagesPerDelta)
 	log.Printf("DB connection string: %s@%s:%d/%s slot:%q publication:%q",
 		c.DB.User, c.DB.Host, c.DB.Port, c.DB.Database, c.SlotName, c.PublicationName)
 	log.Printf("Backing up new tables: %t", c.TrackNewTables)

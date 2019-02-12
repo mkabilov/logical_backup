@@ -2,30 +2,15 @@ package logicalbackup
 
 import (
 	"fmt"
+	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	prom "github.com/ikitiki/logical_backup/pkg/prometheus"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
+	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
 )
 
-func (b *LogicalBackup) maybeRegisterNewName(oid dbutils.OID, name message.NamespacedName) {
-	var lastEntry NameAtLSN
-
-	if b.tableNameChanges.nameChangeHistory[oid] != nil {
-		lastEntry = b.tableNameChanges.nameChangeHistory[oid][len(b.tableNameChanges.nameChangeHistory[oid])-1]
-	}
-	if b.tableNameChanges.nameChangeHistory[oid] == nil || lastEntry.Name != name {
-		b.tableNameChanges.nameChangeHistory[oid] = append(b.tableNameChanges.nameChangeHistory[oid],
-			NameAtLSN{Name: name, Lsn: b.transactionCommitLSN})
-		b.tableNameChanges.isChanged = true
-
-		// inform the tableBackuper about the new name
-		b.backupTables.GetIfExists(oid).SetTextID(name)
-	}
-}
-
-func (b *LogicalBackup) registerMetrics() error {
+func (b *logicalBackup) registerMetrics() error {
 	registerMetrics := []prom.MetricsToRegister{
 		{
 			prom.MessageCounter,
@@ -127,44 +112,48 @@ func (b *LogicalBackup) registerMetrics() error {
 	return nil
 }
 
-func (b *LogicalBackup) updateMetricsAfterWriteDelta(t tablebackup.TableBackuper, cmd msgType, ln uint64) {
-	var promType string
+func (b *logicalBackup) updateMetricsAfterWriteDelta(t tablebackup.TableBackuper, typ message.MType, ln uint) error {
+	promType := typ.String()
 
-	switch cmd {
-	case mInsert:
-		promType = prom.MessageTypeInsert
-	case mUpdate:
-		promType = prom.MessageTypeUpdate
-	case mDelete:
-		promType = prom.MessageTypeDelete
-	case mBegin:
-		promType = prom.MessageTypeBegin
-	case mCommit:
-		promType = prom.MessageTypeCommit
-	case mRelation:
-		promType = prom.MessageTypeRelation
-	case mType:
-		promType = prom.MessageTypeTypeInfo
-	default:
-		promType = prom.MessageTypeUnknown
+	if err := b.prom.Inc(prom.MessageCounter, []string{promType}); err != nil {
+		return err
 	}
 
-	b.prom.Inc(prom.MessageCounter, []string{promType})
-	b.prom.Inc(prom.PerTableMessageCounter, []string{t.OID().String(), t.TextID(), promType})
-	b.prom.SetToCurrentTime(prom.LastWrittenMessageTimestampGauge, nil)
+	if err := b.prom.Inc(prom.PerTableMessageCounter, []string{t.OID().String(), t.String(), promType}); err != nil {
+		return err
+	}
 
-	b.prom.Add(prom.TotalBytesWrittenCounter, float64(ln), nil)
-	b.prom.Add(prom.PerTableBytesCounter, float64(ln), []string{t.OID().String(), t.TextID()})
-	b.prom.Inc(prom.PerTableMessageSinceLastBackupGauge, []string{t.OID().String(), t.TextID()})
+	if err := b.prom.SetToCurrentTime(prom.LastWrittenMessageTimestampGauge, nil); err != nil {
+		return err
+	}
+
+	if err := b.prom.Add(prom.TotalBytesWrittenCounter, float64(ln), nil); err != nil {
+		return err
+	}
+
+	if err := b.prom.Add(prom.PerTableBytesCounter, float64(ln), []string{t.OID().String(), t.String()}); err != nil {
+		return err
+	}
+
+	if err := b.prom.Inc(prom.PerTableMessageSinceLastBackupGauge, []string{t.OID().String(), t.String()}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (b *LogicalBackup) updateMetricsOnCommit(commitTimestamp int64) {
-	for relOID := range b.txBeginRelMsg {
-		tb := b.backupTables.GetIfExists(relOID)
-		b.prom.Set(prom.PerTableLastCommitTimestampGauge, float64(commitTimestamp), []string{tb.OID().String(), tb.TextID()})
+func (b *logicalBackup) updateMetricsCommit(lsn dbutils.LSN, commitTime time.Time) error {
+	if err := b.prom.Inc(prom.TransactionCounter, nil); err != nil {
+		return err
 	}
 
-	b.prom.Inc(prom.TransactionCounter, nil)
-	b.prom.Set(prom.FlushLSNCGauge, float64(b.transactionCommitLSN), nil)
-	b.prom.Set(prom.LastCommitTimestampGauge, float64(commitTimestamp), nil)
+	if err := b.prom.Set(prom.FlushLSNCGauge, float64(lsn), nil); err != nil {
+		return err
+	}
+
+	if err := b.prom.Set(prom.LastCommitTimestampGauge, float64(commitTime.Unix()), nil); err != nil {
+		return err
+	}
+
+	return nil
 }

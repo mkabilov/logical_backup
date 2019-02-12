@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/dbutils"
 	"github.com/ikitiki/logical_backup/pkg/message"
+	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
 )
 
 type decoder struct {
@@ -67,12 +67,12 @@ func (d *decoder) tupledata() []message.Tuple {
 	for i := 0; i < size; i++ {
 		switch d.buf.Next(1)[0] {
 		case 'n':
-			data[i] = message.Tuple{Kind: message.NullValue, Value: []byte{}}
+			data[i] = message.Tuple{Kind: message.TupleNull, Value: []byte{}}
 		case 'u':
-			data[i] = message.Tuple{Kind: message.ToastedValue, Value: []byte{}}
+			data[i] = message.Tuple{Kind: message.TupleToasted, Value: []byte{}}
 		case 't':
 			vsize := int(d.order.Uint32(d.buf.Next(4)))
-			data[i] = message.Tuple{Kind: message.TextValue, Value: d.buf.Next(vsize)}
+			data[i] = message.Tuple{Kind: message.TupleText, Value: d.buf.Next(vsize)}
 		}
 	}
 
@@ -208,7 +208,7 @@ func Parse(src []byte) (message.Message, error) {
 
 		m.RelationOIDs = make([]dbutils.OID, relationsCnt)
 		for i := 0; i < relationsCnt; i++ {
-			m.RelationOIDs[i] = dbutils.OID(d.uint32())
+			m.RelationOIDs[i] = d.oid()
 		}
 
 		return m, nil

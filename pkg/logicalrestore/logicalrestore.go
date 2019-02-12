@@ -2,34 +2,31 @@ package logicalrestore
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
-	"reflect"
 	"sort"
 
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
 
-	"github.com/ikitiki/logical_backup/pkg/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/decoder"
+	"github.com/ikitiki/logical_backup/pkg/basebackup/bbtable"
+	"github.com/ikitiki/logical_backup/pkg/deltas"
 	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
 	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/tablebackup"
 	"github.com/ikitiki/logical_backup/pkg/utils"
+	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/ikitiki/logical_backup/pkg/utils/deltafiles"
+	"github.com/ikitiki/logical_backup/pkg/utils/namehistory"
 )
 
-type LogicalRestorer interface {
-	Restore(schemaName, tableName string) error
-}
-
-type LogicalRestore struct {
+type logicalRestore struct {
 	message.NamespacedName
 
+	curLSN   dbutils.LSN
 	startLSN dbutils.LSN
 	relInfo  message.Relation
 
@@ -38,22 +35,24 @@ type LogicalRestore struct {
 	cfg  pgx.ConnConfig
 	ctx  context.Context
 
-	baseDir string
-	tblOid  dbutils.OID
-	curTx   int32
-	curLsn  dbutils.LSN
+	baseDir  string
+	tableOID dbutils.OID
+
+	truncate bool
 }
 
-func New(tbl message.NamespacedName, dir string, cfg pgx.ConnConfig) *LogicalRestore {
-	return &LogicalRestore{
-		ctx:            context.Background(),
+// New instantiates logical restore
+func New(ctx context.Context, tbl message.NamespacedName, dir string, truncate bool, cfg pgx.ConnConfig) *logicalRestore {
+	return &logicalRestore{
+		ctx:            ctx,
 		baseDir:        dir,
 		cfg:            cfg,
 		NamespacedName: tbl,
+		truncate:       truncate,
 	}
 }
 
-func (r *LogicalRestore) connect() error {
+func (r *logicalRestore) connect() error {
 	conn, err := pgx.Connect(r.cfg)
 	if err != nil {
 		return fmt.Errorf("could not connect: %v", err)
@@ -64,11 +63,11 @@ func (r *LogicalRestore) connect() error {
 	return nil
 }
 
-func (r *LogicalRestore) disconnect() error {
+func (r *logicalRestore) disconnect() error {
 	return r.conn.Close()
 }
 
-func (r *LogicalRestore) begin() error {
+func (r *logicalRestore) begin() error {
 	if r.tx != nil {
 		return fmt.Errorf("there is already a transaction in progress")
 	}
@@ -86,7 +85,7 @@ func (r *LogicalRestore) begin() error {
 	return nil
 }
 
-func (r *LogicalRestore) commit() error {
+func (r *logicalRestore) commit() error {
 	if r.tx == nil {
 		return fmt.Errorf("no running transaction")
 	}
@@ -99,7 +98,7 @@ func (r *LogicalRestore) commit() error {
 	return nil
 }
 
-func (r *LogicalRestore) rollback() error {
+func (r *logicalRestore) rollback() error {
 	if r.tx == nil {
 		return fmt.Errorf("no running transaction")
 	}
@@ -112,10 +111,10 @@ func (r *LogicalRestore) rollback() error {
 	return nil
 }
 
-func (r *LogicalRestore) loadInfo() error {
+func (r *logicalRestore) loadInfo() error {
 	var info message.DumpInfo
 
-	infoFilename := path.Join(r.baseDir, utils.TableDir(r.tblOid), tablebackup.BaseBackupStateFileName)
+	infoFilename := path.Join(r.baseDir, utils.TableDir(r.tableOID), bbtable.BasebackupInfoFilename)
 
 	fp, err := os.OpenFile(infoFilename, os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -127,19 +126,14 @@ func (r *LogicalRestore) loadInfo() error {
 		return fmt.Errorf("could not load dump info: %v", err)
 	}
 
-	if lsn, err := pgx.ParseLSN(info.StartLSN); err != nil {
-		return fmt.Errorf("could not parse lsn: %v", err)
-	} else {
-		r.startLSN = dbutils.LSN(lsn) //TODO: move to pgx.LSN
-	}
-
 	r.relInfo = info.Relation
+	r.startLSN = info.StartLSN
 
 	return nil
 }
 
-func (r *LogicalRestore) loadDump() error {
-	dumpFilename := path.Join(r.baseDir, utils.TableDir(r.tblOid), tablebackup.BasebackupFilename)
+func (r *logicalRestore) loadDump() error {
+	dumpFilename := path.Join(r.baseDir, utils.TableDir(r.tableOID), bbtable.BasebackupFilename)
 
 	if _, err := os.Stat(dumpFilename); os.IsNotExist(err) {
 		log.Printf("dump file doesn't exist, skipping")
@@ -170,148 +164,108 @@ func (r *LogicalRestore) loadDump() error {
 	return nil
 }
 
-func (r *LogicalRestore) applySegmentFile(filePath string) error {
-	log.Printf("reading %q segment file", filePath)
-
-	fp, err := os.OpenFile(filePath, os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("could not open file: %v", err)
+func (r *logicalRestore) applySegmentFile(filename string) error {
+	deltaCollector := deltas.New(path.Join(r.baseDir, utils.TableDir(r.tableOID)), false)
+	if err := deltaCollector.Load(filename); err != nil {
+		return fmt.Errorf("could not load file: %v", err)
 	}
-	defer fp.Close()
 
-	lnBuf := make([]byte, 8)
+	log.Printf("messages in the file: %v", deltaCollector.MessageCnt())
 	for {
-		if n, err := fp.Read(lnBuf); err == io.EOF && n == 0 {
+		msg, err := deltaCollector.GetMessage()
+		if err == io.EOF {
 			break
-		} else if err != nil || n != 8 {
-			return fmt.Errorf("could not read: %v", err)
 		}
 
-		ln := binary.BigEndian.Uint64(lnBuf) - 8
-		dataBuf := make([]byte, ln)
-
-		if n, err := fp.Read(dataBuf); err == io.EOF && n == 0 {
-			break
-		} else if err != nil || uint64(n) != ln {
-			return fmt.Errorf("could not read %d bytes: %v", ln, err)
-		}
-
-		msg, err := decoder.Parse(dataBuf)
-		if err != nil {
-			return fmt.Errorf("could not parse message: %v", err)
-		}
-
-		switch v := msg.(type) {
-		case message.Relation:
-			r.relInfo = v
-		case message.Begin:
-			if r.tx != nil {
-				panic("there is tx already open")
-			}
-
-			if v.FinalLSN < r.startLSN {
-				r.curLsn = dbutils.InvalidLSN
-				r.curTx = 0
-				break
-			}
-
-			r.curTx = v.XID
-			r.curLsn = v.FinalLSN
-
-			if err := r.begin(); err != nil {
-				return fmt.Errorf("could not begin transaction: %v", err)
-			}
-		case message.Commit:
-			if v.LSN < r.startLSN {
-				r.curLsn = dbutils.InvalidLSN
-				r.curTx = 0
-				break
-			}
-
-			if r.curLsn != dbutils.InvalidLSN && r.curLsn != v.LSN {
-				panic(fmt.Sprintf("final LSN(%s) does not match begin LSN(%s)", v.LSN, r.curLsn))
-			}
-
-			if err := r.commit(); err != nil {
-				return fmt.Errorf("could not commit transaction: %v", err)
-			}
-		case message.Origin:
-			//TODO
-		case message.Truncate:
-			//TODO
-		case message.Type:
-			//TODO
-		default:
-			if r.tx == nil {
-				break
-			}
-
-			if err := r.applyDMLMessage(msg); err == nil {
-				break
-			} else {
-				log.Printf("could not apply delta message: %v", err)
-			}
-
-			if r.tx != nil {
-				if err2 := r.rollback(); err2 != nil {
-					return fmt.Errorf("could not rollback transaction: %v", err2)
-				}
-			}
-
-			return fmt.Errorf("could not process message: %v", err)
+		if _, err := r.applyMessage(msg); err != nil {
+			return fmt.Errorf("could not apply message: %v", err)
 		}
 	}
 
 	return nil
 }
 
-func (r *LogicalRestore) execSQL(sql string) error {
+func (r *logicalRestore) execSQL(sql string) error {
 	if sql == "" {
 		return nil
 	}
 
-	_, err := r.tx.ExecEx(r.ctx, sql, &pgx.QueryExOptions{SimpleProtocol: true})
+	if _, err := r.tx.ExecEx(r.ctx, sql, &pgx.QueryExOptions{SimpleProtocol: true}); err != nil {
+		return fmt.Errorf("%v (%q)", err, sql)
+	}
 
-	return err
+	return nil
 }
 
-func (r *LogicalRestore) applyDMLMessage(msg message.Message) (err error) {
-	switch v := msg.(type) {
-	case message.Insert:
-		err = r.execSQL(v.SQL(r.relInfo))
-	case message.Update:
-		err = r.execSQL(v.SQL(r.relInfo))
-	case message.Delete:
-		err = r.execSQL(v.SQL(r.relInfo))
-	default:
-		panic("unreachable")
+func (r *logicalRestore) applyMessage(msg message.Message) (sql string, err error) {
+	if _, ok := msg.(message.Begin); !ok {
+		if r.curLSN.IsValid() && r.curLSN <= r.startLSN {
+			return
+		}
 	}
+
+	switch v := msg.(type) {
+	case message.Begin:
+		r.curLSN = v.FinalLSN
+		if r.curLSN <= r.startLSN {
+			return
+		}
+
+		r.tx, err = r.conn.Begin()
+		if err != nil {
+			err = fmt.Errorf("could not begin: %v", err)
+			return
+		}
+	case message.Commit:
+		if r.tx == nil {
+			break
+		}
+
+		if err = r.tx.Commit(); err != nil {
+			err = fmt.Errorf("could not commit: %v", err)
+			return
+		}
+		r.tx = nil
+	case message.Origin:
+	case message.Type:
+	case message.Insert:
+		sql = v.SQL(r.relInfo)
+	case message.Update:
+		sql = v.SQL(r.relInfo)
+	case message.Delete:
+		sql = v.SQL(r.relInfo)
+	default:
+		panic(fmt.Sprintf("unknown message type: %T", msg))
+	}
+
+	err = r.execSQL(sql)
 
 	return
 }
 
-func (r *LogicalRestore) applyDeltas() error {
-	deltaDir := path.Join(r.baseDir, utils.TableDir(r.tblOid), tablebackup.DeltasDirName)
+func (r *logicalRestore) applyDeltas() error {
+	deltaDir := path.Join(r.baseDir, utils.TableDir(r.tableOID), deltas.DirName)
 
 	fileList, err := ioutil.ReadDir(deltaDir)
 	if err != nil {
 		return fmt.Errorf("could not read directory: %v", err)
 	}
 
-	segmentFiles := make(segments, 0)
+	deltaFiles := make(deltafiles.DeltaFiles, 0)
 	for _, v := range fileList {
-		segmentFiles = append(segmentFiles, v.Name())
+		deltaFiles = append(deltaFiles, v.Name())
 	}
 
-	if len(segmentFiles) == 0 {
+	if len(deltaFiles) == 0 {
 		log.Printf("no delta files")
 		return nil
 	}
 
-	sort.Sort(segmentFiles)
+	sort.Sort(deltaFiles)
 
-	for _, filename := range segmentFiles {
-		if err := r.applySegmentFile(path.Join(deltaDir, filename)); err != nil {
+	for _, filename := range deltaFiles {
+		log.Printf("applying delta: %v", filename)
+		if err := r.applySegmentFile(filename); err != nil {
 			return fmt.Errorf("could not apply deltas from %q file: %v", filename, err)
 		}
 	}
@@ -319,84 +273,62 @@ func (r *LogicalRestore) applyDeltas() error {
 	return nil
 }
 
-func (r *LogicalRestore) checkTableStruct() error {
-	if err := r.begin(); err != nil {
+func (r *logicalRestore) setTableOID() error {
+	tableNames := namehistory.New(path.Join(r.baseDir, logicalbackup.OidNameMapFile))
+	if err := tableNames.Load(); err != nil {
 		return err
 	}
 
-	relationInfo, err := tablebackup.FetchRelationInfo(r.tx, r.NamespacedName)
-	if err != nil {
-		return fmt.Errorf("could not fetch table info: %v", err)
+	oid, _ := tableNames.GetOID(r.NamespacedName, dbutils.InvalidLSN)
+	if oid == dbutils.InvalidOID {
+		return fmt.Errorf("could not find table")
 	}
-
-	if !reflect.DeepEqual(relationInfo.Columns, r.relInfo.Columns) {
-		return fmt.Errorf("table structs do not match: \n%#v\n%#v", relationInfo.Structure(), r.relInfo.Structure())
-	}
-
-	if err := r.commit(); err != nil {
-		return err
-	}
+	r.tableOID = oid
 
 	return nil
 }
 
-func (r *LogicalRestore) getOID(tblName message.NamespacedName) (dbutils.OID, error) {
-	history := make(map[dbutils.OID][]logicalbackup.NameAtLSN)
-
-	oidMapFilename := path.Join(r.baseDir, logicalbackup.OidNameMapFile)
-
-	fp, err := os.OpenFile(oidMapFilename, os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		return dbutils.InvalidOID, fmt.Errorf("could not open file: %v", err)
-	}
-	defer fp.Close()
-
-	if err = yaml.NewDecoder(fp).Decode(&history); err != nil {
-		return dbutils.InvalidOID, fmt.Errorf("could not decode yaml: %v", err)
-	}
-
-	maxLsn := dbutils.InvalidLSN
-	lastOid := dbutils.InvalidOID
-	for oid, names := range history {
-		for _, n := range names {
-			if n.Name != tblName {
-				continue
-			}
-
-			if n.Lsn > r.startLSN {
-				continue
-			}
-
-			if n.Lsn > maxLsn || maxLsn == 0 {
-				maxLsn = n.Lsn
-				lastOid = oid
-			}
-		}
-	}
-
-	return lastOid, nil
-}
-
-func (r *LogicalRestore) disableConstraints() error {
+func (r *logicalRestore) disableConstraints() error {
 	//TODO
 	return nil
 }
 
-func (r *LogicalRestore) enableConstraints() error {
+func (r *logicalRestore) enableConstraints() error {
 	//TODO
 	return nil
 }
 
-func (r *LogicalRestore) Restore() error {
-	tblOid, err := r.getOID(r.NamespacedName)
-	if err != nil {
-		return fmt.Errorf("could not get oid of the table: %v", err)
-	}
-	if tblOid == dbutils.InvalidOID {
-		return fmt.Errorf("could not find oid for the table, table does not exist?")
+func (r *logicalRestore) checkTableStruct() error {
+	var rel message.Relation
+
+	if err := rel.FetchByName(r.conn, r.NamespacedName); err != nil {
+		return fmt.Errorf("could not fetch table info from the db: %v", err)
 	}
 
-	r.tblOid = tblOid
+	rel.OID = r.tableOID // fake that we have same oid (in fact we might not)
+
+	if !r.relInfo.Equals(&rel) {
+		log.Printf("src table: %#v", r.relInfo)
+		log.Printf("dst table: %#v", rel)
+		return fmt.Errorf("tables are different")
+	}
+
+	return nil
+}
+
+func (r *logicalRestore) truncateTable() error {
+	if _, err := r.conn.Exec(fmt.Sprintf("truncate %s", r.Sanitize())); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Restore restores the table
+func (r *logicalRestore) Restore() error {
+	if err := r.setTableOID(); err != nil {
+		return fmt.Errorf("could not load table names: %v", err)
+	}
 
 	if err := r.loadInfo(); err != nil {
 		return fmt.Errorf("could not load dump info: %v", err)
@@ -405,7 +337,11 @@ func (r *LogicalRestore) Restore() error {
 	if err := r.connect(); err != nil {
 		return fmt.Errorf("could not connect: %v", err)
 	}
-	defer r.disconnect()
+	defer func() {
+		if err := r.disconnect(); err != nil {
+			log.Printf("could not disconnect: %v", err)
+		}
+	}()
 
 	if err := r.checkTableStruct(); err != nil {
 		return fmt.Errorf("table struct error: %v", err)
@@ -414,6 +350,16 @@ func (r *LogicalRestore) Restore() error {
 	if err := r.disableConstraints(); err != nil {
 		return fmt.Errorf("could not disable constraints: %v", err)
 	}
+
+	if r.truncate {
+		if err := r.truncateTable(); err != nil {
+			return fmt.Errorf("could not truncate table: %v", err)
+		}
+
+		log.Printf("table %s truncated", r)
+	}
+
+	log.Printf("start lsn: %v", r.startLSN)
 
 	if err := r.loadDump(); err != nil {
 		return fmt.Errorf("could not load dump: %v", err)

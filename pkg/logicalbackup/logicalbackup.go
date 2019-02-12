@@ -8,135 +8,88 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
-	"path"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jackc/pgx"
-	"gopkg.in/yaml.v2"
 
+	"github.com/ikitiki/logical_backup/pkg/basebackup"
 	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/decoder"
+	"github.com/ikitiki/logical_backup/pkg/consumer"
 	"github.com/ikitiki/logical_backup/pkg/message"
 	prom "github.com/ikitiki/logical_backup/pkg/prometheus"
-	"github.com/ikitiki/logical_backup/pkg/queue"
 	"github.com/ikitiki/logical_backup/pkg/tablebackup"
 	"github.com/ikitiki/logical_backup/pkg/utils"
+	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/ikitiki/logical_backup/pkg/utils/namehistory"
+	"github.com/ikitiki/logical_backup/pkg/utils/tablesmap"
 )
-
-type msgType int
 
 const (
-	applicationName = "logical_backup"
-	OidNameMapFile  = "oid2name.yaml"
-	stateFile       = "state.yaml"
-	httpSrvPort     = 8080
-	httpSrvTimeout  = 20 * time.Second
+	//OidNameMapFile represents file name of the oid-to-name map file
+	OidNameMapFile = "oid2name.yaml"
 
-	statusTimeout   = time.Second * 10
-	replWaitTimeout = time.Second * 10
-
-	mInsert msgType = iota
-	mUpdate
-	mDelete
-	mBegin
-	mCommit
-	mRelation
-	mType
+	pgApplicationName = "logical_backup"
+	httpSrvPort       = 8080
+	httpSrvTimeout    = 20 * time.Second
 )
 
-type NameAtLSN struct {
-	Name message.NamespacedName
-	Lsn  dbutils.LSN
-}
-
-type oidToName struct {
-	isChanged         bool
-	nameChangeHistory map[dbutils.OID][]NameAtLSN
-}
-
-type StateInfo struct {
-	Timestamp  time.Time
-	CurrentLSN string
-}
-
-type LogicalBackuper interface {
-	Run()
-	Wait()
-}
-
-type LogicalBackup struct {
+type logicalBackup struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	waitGr *sync.WaitGroup
+	errCh  chan error
 
-	cfg *config.Config
+	// configs
+	cfg   *config.Config
+	dbCfg pgx.ConnConfig
 
-	pluginArgs []string
+	// auxiliary background workers
+	srv          http.Server
+	baseBackuper basebackup.Basebackuper
+	consumer     consumer.Interface
 
-	backupTables *BackupTables
+	tables               tablesmap.TablesMapInterface // list of tables to take care
+	nameHistory          namehistory.Interface        // table name history
+	transactionCommitLSN dbutils.LSN                  // commit LSN of the latest observed transaction
+	latestFlushLSN       dbutils.LSN                  // latest LSN flushed to disk
+	beginTxLSN           dbutils.LSN
+	relationsPendingTx   map[dbutils.OID]struct{} // list of the relations with begin pending message
+	beginMsg             message.Begin
+	typeMsg              message.Type
 
-	tableNameChanges oidToName
-
-	dbCfg    pgx.ConnConfig
-	replConn *pgx.ReplicationConn // replication connection for fetching deltas
-	tx       *pgx.Tx
-
-	currentLSN           dbutils.LSN // latest received LSN
-	transactionCommitLSN dbutils.LSN // commit LSN of the latest observed transaction (obtained when reading BEGIN)
-	latestFlushLSN       dbutils.LSN // latest LSN flushed to disk
-	lastTxId             int32       // transaction ID of the latest observed transaction (obtained when reading BEGIN)
-
-	basebackupQueue *queue.Queue
-	waitGr          *sync.WaitGroup
-	stopCh          chan struct{}
-	closeOnce       sync.Once
-
-	// TODO: should we get rid of those altogether given that we have prometheus?
-	msgCnt       map[msgType]int
-	bytesWritten uint64
-
-	txBeginRelMsg    map[dbutils.OID]struct{} // list of the relations with begin pending message
-	relationMessages map[dbutils.OID][]byte
-	beginMsg         []byte
-	typeMsg          []byte
-
-	srv  http.Server
-	prom prom.PrometheusExporterInterface
+	prom prom.PromInterface
 }
 
-func New(cfg *config.Config) (*LogicalBackup, error) {
+// New instantiates logical backup tool
+func New(cfg *config.Config) (*logicalBackup, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	lb := &LogicalBackup{
-		ctx:    ctx,
-		cancel: cancel,
-		stopCh: make(chan struct{}),
-
-		backupTables:     NewBackupTables(),
-		relationMessages: make(map[dbutils.OID][]byte),
-		tableNameChanges: oidToName{nameChangeHistory: make(map[dbutils.OID][]NameAtLSN)},
-		pluginArgs:       []string{`"proto_version" '1'`, fmt.Sprintf(`"publication_names" '%s'`, cfg.PublicationName)},
-		basebackupQueue:  queue.New(ctx),
-		waitGr:           &sync.WaitGroup{},
-		cfg:              cfg,
-		msgCnt:           make(map[msgType]int),
-		prom:             prom.New(cfg.PrometheusPort),
+	lb := &logicalBackup{
+		ctx:                ctx,
+		cancel:             cancel,
+		errCh:              make(chan error),
+		tables:             tablesmap.New(),
+		relationsPendingTx: make(map[dbutils.OID]struct{}),
+		waitGr:             &sync.WaitGroup{},
+		cfg:                cfg,
+		prom:               prom.New(cfg.PrometheusPort),
 	}
+	lb.baseBackuper = basebackup.New(ctx, lb.tables, cfg)
 
 	lb.initHttpSrv(httpSrvPort)
+	lb.nameHistory = namehistory.New(lb.filePath(OidNameMapFile))
 
-	if err := createDirs(cfg.StagingDir, cfg.ArchiveDir); err != nil {
-		return nil, err
-	}
-
-	if err := lb.initReplConn(); err != nil {
+	if err := utils.CreateDirs(cfg.StagingDir, cfg.ArchiveDir); err != nil {
 		return nil, err
 	}
 
 	if err := lb.prepareDB(); err != nil {
 		return nil, err
 	}
+
+	lb.consumer = consumer.New(ctx, lb.errCh, cfg.DB, cfg.SlotName, cfg.PublicationName, lb.latestFlushLSN)
 
 	if err := lb.registerMetrics(); err != nil {
 		return nil, err
@@ -145,33 +98,52 @@ func New(cfg *config.Config) (*LogicalBackup, error) {
 	return lb, nil
 }
 
-func createDirs(dirs ...string) error {
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			if err := os.Mkdir(dir, os.ModePerm); err != nil {
-				return fmt.Errorf("could not create %q dir: %v", dir, err)
-			}
-		} else if err != nil {
-			return fmt.Errorf("%q stat error: %v", dir, err)
-		}
+// Run runs logical backup
+func (b *logicalBackup) Run() error {
+	if b.cfg.InitialBasebackup {
+		log.Printf("Queueing all the tables for the initial backup")
+		b.tables.Map(func(t tablebackup.TableBackuper) {
+			t.QueueBasebackup()
+		})
 	}
+
+	if err := b.consumer.Run(b); err != nil {
+		return fmt.Errorf("could not run consumer: %v", err)
+	}
+
+	b.baseBackuper.Run(b.cfg.ConcurrentBasebackups)
+	b.runHttpSrv()
+
+	b.waitGr.Add(1)
+	go b.prom.Run(b.ctx, b.waitGr)
+
+	b.waitForShutdown()
+	b.cancel()
+
+	b.consumer.Wait()
+	b.baseBackuper.Wait()
+	b.tables.Map(func(t tablebackup.TableBackuper) {
+		t.Wait()
+	})
+	b.waitGr.Wait()
 
 	return nil
 }
 
-func (b *LogicalBackup) prepareDB() error {
+// prepareDB creates replication slot if necessary
+func (b *logicalBackup) prepareDB() error {
 	b.dbCfg = b.cfg.DB
-	b.dbCfg.RuntimeParams = map[string]string{"application_name": applicationName}
+	b.dbCfg.RuntimeParams = map[string]string{"application_name": pgApplicationName}
 
 	conn, err := pgx.Connect(b.dbCfg) // non replication protocol db connection
 	if err != nil {
 		return fmt.Errorf("could not connect: %v", err)
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Printf("could not close db connection: %v", err)
+		}
+	}()
 
 	//TODO: switch to more sophisticated logger and display pid only if in debug mode
 	log.Printf("Pg backend session PID: %d", conn.PID())
@@ -185,9 +157,7 @@ func (b *LogicalBackup) prepareDB() error {
 		return fmt.Errorf("could not init replication slot; %v", err)
 	}
 
-	// invalid start LSN and no error from initSlot denotes a non-existing slot.
-	slotExists := b.latestFlushLSN.IsValid()
-	if !slotExists {
+	if !b.latestFlushLSN.IsValid() { // invalid start LSN and no error from initSlot denotes a non-existing slot.
 		// TODO: this will discard all existing backup data, we should probably bail out if existing backup is there
 		log.Printf("Creating logical replication slot %s", b.cfg.SlotName)
 
@@ -200,21 +170,11 @@ func (b *LogicalBackup) prepareDB() error {
 		// solve impedance mismatch between the flush LSN (the LSN we confirmed and flushed) and slot initial LSN
 		// (next, but not yet received LSN).
 		b.latestFlushLSN = initialLSN - 1
-
-		if err := b.writeRestartLSN(); err != nil {
-			log.Printf("could not store initial LSN: %v", err)
-		}
 	} else {
-		restartLSN, err := b.readRestartLSN()
-		if err != nil {
+		if restartLSN, err := b.readRestartLSN(); err != nil {
 			return fmt.Errorf("could not read previous flush lsn: %v", err)
-		}
-		if restartLSN.IsValid() {
+		} else if restartLSN.IsValid() {
 			b.latestFlushLSN = restartLSN
-		}
-		// we may have flushed the final segment at shutdown without bothering to advance the slot LSN.
-		if err := b.sendStatus(); err != nil {
-			log.Printf("could not send replay progress: %v", err)
 		}
 	}
 
@@ -226,322 +186,232 @@ func (b *LogicalBackup) prepareDB() error {
 	return nil
 }
 
-func (b *LogicalBackup) initHttpSrv(port int) {
-	mux := http.NewServeMux()
+func (b *logicalBackup) readRestartLSN() (dbutils.LSN, error) {
+	//TODO:
 
-	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
-	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
-	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
-	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
-	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
+	return dbutils.InvalidLSN, nil
+}
 
-	b.srv = http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: http.TimeoutHandler(mux, httpSrvTimeout, ""),
+// flushLSN gets the minimum flush lsn among all the tables
+func (b *logicalBackup) flushLSN() dbutils.LSN {
+	lsn := dbutils.InvalidLSN
+
+	b.tables.Map(func(t tablebackup.TableBackuper) {
+		if flushLSN := t.FlushLSN(); flushLSN.IsValid() {
+			if !lsn.IsValid() || flushLSN < lsn {
+				lsn = flushLSN
+			}
+		}
+	})
+
+	return lsn
+}
+
+func (b *logicalBackup) filePath(parts ...string) string {
+	var path string
+
+	if b.cfg.StagingDir != "" {
+		path = b.cfg.StagingDir
+	}
+	path = b.cfg.ArchiveDir
+
+	for _, part := range parts {
+		path = filepath.Join(path, part)
+	}
+
+	return path
+}
+
+//HandleMessage processes the incoming logical replication message
+func (b *logicalBackup) HandleMessage(msg message.Message, walStart dbutils.LSN) error {
+	switch v := msg.(type) {
+	case message.Relation:
+		return b.processRelationMessage(v)
+	case message.Insert:
+		return b.processInsertMessage(v)
+	case message.Update:
+		return b.processUpdateMessage(v)
+	case message.Delete:
+		return b.processDeleteMessage(v)
+	case message.Begin:
+		b.beginTxLSN = walStart
+		return b.processBeginMessage(v)
+	case message.Commit:
+		b.transactionCommitLSN = v.LSN
+		return b.processCommitMessage(v)
+	case message.Origin:
+		return b.processOriginMessage(v)
+	case message.Truncate:
+		return b.processTruncateMessage(v)
+	case message.Type:
+		return b.processTypeMessage(v)
+	default:
+		return fmt.Errorf("unknown message type")
 	}
 }
 
-func (b *LogicalBackup) initReplConn() error {
-	rc, err := pgx.ReplicationConnect(b.cfg.DB)
-	if err != nil {
-		return fmt.Errorf("could not connect using replication protocol: %v", err)
+func (b *logicalBackup) writeTableDMLMessage(relOID dbutils.OID, msg message.Message) error {
+	tb, ok := b.tables.Get(relOID)
+	if !ok {
+		return fmt.Errorf("could not find relation with oid %v", relOID)
 	}
-	b.replConn = rc
+
+	// write pending begin message
+	if _, ok := b.relationsPendingTx[relOID]; !ok {
+		if err := tb.ProcessBegin(b.beginMsg); err != nil {
+			return err
+		}
+
+		b.relationsPendingTx[relOID] = struct{}{}
+	}
+
+	if err := tb.ProcessDMLMessage(msg); err != nil {
+		return fmt.Errorf("could not save message: %v", err)
+	}
+
+	if err := b.updateMetricsAfterWriteDelta(tb, msg.MsgType(), uint(len(msg.RawData()))); err != nil {
+		log.Printf("could not update metrics for %s table: %v", tb, err)
+	}
 
 	return nil
 }
 
-func (b *LogicalBackup) baseDir() string {
-	if b.cfg.StagingDir != "" {
-		return b.cfg.StagingDir
-	}
-
-	return b.cfg.ArchiveDir
+func (b *logicalBackup) processInsertMessage(msg message.Insert) error {
+	return b.writeTableDMLMessage(msg.RelationOID, msg)
 }
 
-func (b *LogicalBackup) processDMLMessage(tableOID dbutils.OID, typ msgType, msg []byte) error {
-	bt, ok := b.backupTables.Get(tableOID)
-	if !ok {
-		log.Printf("table with OID %d is not tracked", tableOID)
+func (b *logicalBackup) processUpdateMessage(msg message.Update) error {
+	return b.writeTableDMLMessage(msg.RelationOID, msg)
+}
+
+func (b *logicalBackup) processDeleteMessage(msg message.Delete) error {
+	return b.writeTableDMLMessage(msg.RelationOID, msg)
+}
+
+func (b *logicalBackup) processRelationMessage(msg message.Relation) error {
+	if tb, isRegistered := b.tables.Get(msg.OID); isRegistered {
+		b.nameHistory.SetName(tb.OID(), b.beginTxLSN, msg.NamespacedName)
+		tb.SetName(msg.NamespacedName)
 		return nil
 	}
 
-	// We need to write the transaction begin message to every table being collected,
-	// therefore, it cannot be written right away when we receive it. Instead, wait for
-	// the actual relation data to arrive and then write it here.
-	// TODO: avoid multiple writes
-	if _, ok := b.txBeginRelMsg[tableOID]; !ok {
-		if err := b.WriteTableMessage(bt, mBegin, b.beginMsg); err != nil {
-			return err
-		}
-		b.txBeginRelMsg[bt.OID()] = struct{}{}
-	}
-
-	if b.typeMsg != nil {
-		if err := b.WriteTableMessage(bt, mType, b.typeMsg); err != nil {
-			return fmt.Errorf("could not write type message: %v", err)
-		}
-		b.typeMsg = nil
-	}
-
-	if relationMsg, ok := b.relationMessages[tableOID]; ok {
-		if err := b.WriteTableMessage(bt, mRelation, relationMsg); err != nil {
-			return fmt.Errorf("could not write a relation message: %v", err)
-		}
-		delete(b.relationMessages, tableOID)
-	}
-
-	if err := b.WriteTableMessage(bt, typ, msg); err != nil {
-		return fmt.Errorf("could not write message: %v", err)
+	if track, err := b.registerNewTable(msg); err != nil {
+		return fmt.Errorf("could not add a backup process for the new table %s: %v", msg.NamespacedName, err)
+	} else if !track { // instructed not to track this table
+		return nil
 	}
 
 	return nil
 }
 
-func (b *LogicalBackup) WriteTableMessage(t tablebackup.TableBackuper, typ msgType, msg []byte) error {
-	ln, err := t.WriteDelta(msg, b.transactionCommitLSN, b.currentLSN)
-	if err != nil {
-		return err
-	}
-
-	b.bytesWritten += ln
-	b.msgCnt[typ]++
-
-	b.updateMetricsAfterWriteDelta(t, typ, ln)
-
-	return nil
-}
-
-func (b *LogicalBackup) handler(m message.Message, walStart dbutils.LSN) error {
+func (b *logicalBackup) processTruncateMessage(msg message.Truncate) error {
 	var err error
 
-	b.currentLSN = walStart
-
-	switch v := m.(type) {
-	case message.Relation:
-		err = b.processRelationMessage(v)
-	case message.Insert:
-		err = b.processDMLMessage(v.RelationOID, mInsert, v.Raw)
-	case message.Update:
-		err = b.processDMLMessage(v.RelationOID, mUpdate, v.Raw)
-	case message.Delete:
-		err = b.processDMLMessage(v.RelationOID, mDelete, v.Raw)
-	case message.Begin:
-		b.lastTxId = v.XID
-		b.transactionCommitLSN = v.FinalLSN
-
-		b.txBeginRelMsg = make(map[dbutils.OID]struct{})
-		b.beginMsg = v.Raw
-	case message.Commit:
-		// commit is special, because the LSN of the CopyData message points past the commit message.
-		// for consistency we set the currentLSN here to the commit message LSN inside the commit itself.
-		b.currentLSN = v.LSN
-		for relOID := range b.txBeginRelMsg {
-			tb := b.backupTables.GetIfExists(relOID)
-			if err = b.WriteTableMessage(tb, mCommit, v.Raw); err != nil {
-				return err
-			}
+	for _, oid := range msg.RelationOIDs {
+		err = b.writeTableDMLMessage(oid, msg)
+		if err != nil {
+			break
 		}
-
-		// if there were any changes in the table names, flush the map file
-		if err := b.flushOidNameMap(); err != nil {
-			log.Printf("could not flush the oid to map file: %v", err)
-		}
-
-		candidateFlushLSN := b.getNextFlushLSN()
-
-		if candidateFlushLSN > b.latestFlushLSN {
-			b.latestFlushLSN = candidateFlushLSN
-			log.Printf("advanced flush LSN to %s", b.latestFlushLSN)
-
-			if err := b.writeRestartLSN(); err != nil {
-				log.Printf("could not store flush LSN: %v", err)
-			}
-
-			if err = b.sendStatus(); err != nil {
-				log.Printf("could not send replay progress: %v", err)
-			}
-		}
-
-		b.updateMetricsOnCommit(v.Timestamp.Unix())
-
-	case message.Origin:
-		//TODO:
-	case message.Truncate:
-		//TODO:
-	case message.Type:
-		//TODO: consider writing this message to all tables in a transaction as a safety measure during restore.
 	}
 
 	return err
 }
 
-// getNextFlushLSN computes a minimum among flush LSNs of all tables that are part of the logical backup.
-// As we flush data by reaching deltasPerFile changes since the last flush and each table is written into
-// its own file, the LSNs that are guaranteed to be flushed may vary from one table to another.
-func (b *LogicalBackup) getNextFlushLSN() dbutils.LSN {
-	result := b.transactionCommitLSN
-
-	b.backupTables.Map(func(table tablebackup.TableBackuper) {
-		flushLSN, isFlushRequired := table.GetFlushLSN()
-		// ignore tables that didn't change since the previous flush
-		if isFlushRequired && flushLSN < result {
-			result = flushLSN
-		}
-	})
-
-	return result
+func (b *logicalBackup) processOriginMessage(msg message.Origin) error {
+	//TODO:
+	return nil
 }
 
-// act on a new relation message. We act on table renames, drops and recreations and new tables
-func (b *LogicalBackup) processRelationMessage(m message.Relation) error {
-	if _, isRegistered := b.backupTables.Get(m.OID); !isRegistered {
-		if track, err := b.registerNewTable(m); !track || err != nil {
-			if err != nil {
-				return fmt.Errorf("could not add a backup process for the new table %s: %v", m.NamespacedName, err)
-			}
-			// instructed not to track this table
-			return nil
-		}
-	}
-	b.maybeRegisterNewName(m.OID, m.NamespacedName)
-	b.relationMessages[m.OID] = m.Raw
-	// we will write this message later, when we receive the actual DML for this table
+func (b *logicalBackup) processTypeMessage(msg message.Type) error {
+	//TODO: consider writing this message to all tables in a transaction as a safety measure during restore.
+	return nil
+}
+
+func (b *logicalBackup) processBeginMessage(msg message.Begin) error {
+	b.relationsPendingTx = make(map[dbutils.OID]struct{})
+	b.beginMsg = msg
 
 	return nil
 }
 
-func (b *LogicalBackup) registerNewTable(m message.Relation) (bool, error) {
+// AdvanceLSN checks if we need to advance lsn
+func (b *logicalBackup) AdvanceLSN() {
+	if candidateFlushLSN := b.flushLSN(); candidateFlushLSN > b.latestFlushLSN {
+		b.latestFlushLSN = candidateFlushLSN
+		b.consumer.AdvanceLSN(b.latestFlushLSN)
+
+		if err := b.consumer.SendStatus(); err != nil {
+			log.Printf("could not send replay progress: %v", err)
+		}
+	}
+}
+
+// QueueTable queues the basebackup of the table
+func (b *logicalBackup) QueueTable(t tablebackup.TableBackuper) {
+	b.baseBackuper.QueueTable(t)
+}
+
+func (b *logicalBackup) processCommitMessage(msg message.Commit) error {
+	// commit is special, because the LSN of the CopyData message points past the commit message.
+	// for consistency we set the currentLSN here to the commit message LSN inside the commit itself.
+
+	for relOID := range b.relationsPendingTx {
+		tb, ok := b.tables.Get(relOID)
+		if !ok {
+			return fmt.Errorf("could not find relation with oid %v", relOID)
+		}
+
+		if err := tb.ProcessCommit(msg); err != nil {
+			return fmt.Errorf("could not write commit message for table with %v oid: %v", relOID, err)
+		}
+	}
+
+	// if there were any changes in the table names, flush the map file
+	if err := b.nameHistory.Save(); err != nil {
+		log.Printf("could not flush the oid to map file: %v", err)
+	}
+
+	b.AdvanceLSN()
+
+	if err := b.updateMetricsCommit(b.transactionCommitLSN, msg.Timestamp); err != nil {
+		log.Printf("could not update metrics: %v", err)
+	}
+
+	return nil
+}
+
+func (b *logicalBackup) registerNewTable(msg message.Relation) (bool, error) {
+	var (
+		tb  tablebackup.TableBackuper
+		err error
+	)
+
 	if !b.cfg.TrackNewTables {
 		log.Printf("skip the table with oid %d and name %v because we are configured not to track new tables",
-			m.OID, m.NamespacedName)
+			msg.OID, msg.NamespacedName)
 		return false, nil
 	}
 
-	tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, m.NamespacedName, m.OID, b.dbCfg, b.basebackupQueue, b.prom)
+	tb, err = tablebackup.New(b.ctx, msg.NamespacedName, msg.OID, b, b.cfg, b.prom)
 	if err != nil {
 		return false, err
 	}
 
-	b.backupTables.Set(m.OID, tb)
-	log.Printf("registered new table with oid %d and name %s", m.OID, m.NamespacedName.Sanitize())
+	if err := tb.ProcessRelationMessage(msg); err != nil {
+		return false, err
+	}
+
+	b.tables.Set(msg.OID, tb)
+	b.nameHistory.SetName(msg.OID, b.beginTxLSN, msg.NamespacedName)
+	log.Printf("registered new table with oid %d and name %s", msg.OID, msg.NamespacedName.Sanitize())
 
 	return true, nil
 }
 
-func (b *LogicalBackup) sendStatus() error {
-	log.Printf("sending new status with %s flush lsn (i:%d u:%d d:%d b:%0.2fMb) ",
-		b.latestFlushLSN, b.msgCnt[mInsert], b.msgCnt[mUpdate], b.msgCnt[mDelete], float64(b.bytesWritten)/1048576)
-
-	b.msgCnt = make(map[msgType]int)
-	b.bytesWritten = 0
-
-	status, err := pgx.NewStandbyStatus(uint64(b.latestFlushLSN))
-
-	if err != nil {
-		return fmt.Errorf("error creating standby status: %s", err)
-	}
-
-	if err := b.replConn.SendStandbyStatus(status); err != nil {
-		return fmt.Errorf("failed to send standy status: %s", err)
-	}
-
-	return nil
-}
-
-func (b *LogicalBackup) logicalDecoding() {
-	defer b.waitGr.Done()
-
-	// TODO: move out the initialization routines
-	log.Printf("Starting from %s lsn", b.latestFlushLSN)
-
-	err := b.replConn.StartReplication(b.cfg.SlotName, uint64(b.latestFlushLSN), -1, b.pluginArgs...)
-	if err != nil {
-		log.Printf("failed to start replication: %s", err)
-		b.Close()
-		return
-	}
-
-	ticker := time.NewTicker(statusTimeout)
-	for {
-		select {
-		case <-b.ctx.Done():
-			ticker.Stop()
-			return
-		case <-ticker.C:
-			if err := b.sendStatus(); err != nil {
-				log.Printf("could not send replay progress: %v", err)
-				b.Close()
-				return
-			}
-		default:
-			wctx, cancel := context.WithTimeout(b.ctx, replWaitTimeout)
-			repMsg, err := b.replConn.WaitForReplicationMessage(wctx)
-			cancel()
-			if err == context.DeadlineExceeded {
-				continue
-			}
-			if err == context.Canceled {
-				log.Printf("received shutdown request: replication terminated")
-				return
-			}
-			// TODO: make sure we retry and cleanup after ourselves afterwards
-			if err != nil {
-				log.Printf("replication failed: %v", err)
-				b.Close()
-				return
-			}
-
-			if repMsg == nil {
-				log.Printf("received null replication message")
-				continue
-			}
-
-			if repMsg.WalMessage != nil {
-				walStart := dbutils.LSN(repMsg.WalMessage.WalStart)
-				// We may have flushed this LSN to all tables, but the slot's restart LSN did not advance
-				// and it is sent to us again after the restart of the backup tool. Skip it, unless it is a non-data
-				// message that doesn't have any LSN assigned.
-				if walStart.IsValid() && walStart <= b.latestFlushLSN {
-					log.Printf("received WAL message with LSN %s that is lower or equal to the flush LSN %s, skipping",
-						b.currentLSN, b.latestFlushLSN)
-					continue
-				}
-				logmsg, err := decoder.Parse(repMsg.WalMessage.WalData)
-				if err != nil {
-					log.Printf("invalid pgoutput message: %s", err)
-					b.Close()
-					return
-				}
-
-				if err := b.handler(logmsg, walStart); err != nil {
-					log.Printf("error handling waldata: %s", err)
-					b.Close()
-					return
-				}
-			}
-
-			if repMsg.ServerHeartbeat != nil && repMsg.ServerHeartbeat.ReplyRequested == 1 {
-				log.Println("server wants a reply")
-				if err := b.sendStatus(); err != nil {
-					log.Printf("could not send replay progress: %v", err)
-					b.Close()
-					return
-				}
-			}
-		}
-	}
-}
-
-// Wait for the goroutines to finish
-func (b *LogicalBackup) Wait() {
-	b.waitGr.Wait()
-}
-
 // register tables for the backup; add replica identity when necessary
-func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
+func (b *logicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	// fetch all tables from the current publication, together with the information on whether we need to create
-	// replica identity full for them
+	// replica identity "full" for them
 	type tableInfo struct {
 		oid             dbutils.OID
 		name            message.NamespacedName
@@ -565,20 +435,17 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 	}
 
 	tables := make([]tableInfo, 0)
-	func() {
-		defer rows.Close()
+	for rows.Next() {
+		var tab tableInfo
 
-		for rows.Next() {
-			tab := tableInfo{}
-			err = rows.Scan(&tab.oid, &tab.name.Namespace, &tab.name.Name, &tab.hasPK, &tab.replicaIdentity)
-			if err != nil {
-				return
-			}
-
-			tables = append(tables, tab)
+		err = rows.Scan(&tab.oid, &tab.name.Namespace, &tab.name.Name, &tab.hasPK, &tab.replicaIdentity)
+		if err != nil {
+			break
 		}
-	}()
 
+		tables = append(tables, tab)
+	}
+	rows.Close()
 	if err != nil {
 		return fmt.Errorf("could not fetch row values from the driver: %v", err)
 	}
@@ -600,193 +467,36 @@ func (b *LogicalBackup) prepareTablesForPublication(conn *pgx.Conn) error {
 			fqtn := t.name.Sanitize()
 
 			if _, err := conn.Exec(fmt.Sprintf("alter table only %s replica identity %s", fqtn, targetReplicaIdentity)); err != nil {
-				return fmt.Errorf("could not set replica identity to %s for table %s: %v", targetReplicaIdentity, fqtn, err)
+				return fmt.Errorf("could not set replica identity to %s for %s table: %v", targetReplicaIdentity, fqtn, err)
 			}
 
-			log.Printf("set replica identity to %s for table %s", targetReplicaIdentity, fqtn)
+			log.Printf("set replica identity to %s for %s table", targetReplicaIdentity, fqtn)
 		}
+	}
 
-		tb, err := tablebackup.New(b.ctx, b.waitGr, b.cfg, t.name, t.oid, b.dbCfg, b.basebackupQueue, b.prom)
+	for _, t := range tables {
+		tb, err := tablebackup.New(b.ctx, t.name, t.oid, b, b.cfg, b.prom)
 		if err != nil {
 			return fmt.Errorf("could not create tablebackup instance: %v", err)
 		}
 
-		b.backupTables.Set(t.oid, tb)
+		if err := tb.LoadTableInfo(); err != nil {
+			return fmt.Errorf("could not load table info: %v", err)
+		}
 
-		// register the new table OID to name mapping
-		b.maybeRegisterNewName(t.oid, tb.NamespacedName)
-
+		b.tables.Set(t.oid, tb)
+		b.nameHistory.SetName(t.oid, b.latestFlushLSN, tb.NamespacedName)
 	}
+
 	// flush the OID to name mapping
-	if err := b.flushOidNameMap(); err != nil {
+	if err := b.nameHistory.Save(); err != nil {
 		log.Printf("could not flush oid name map: %v", err)
 	}
 
 	return nil
 }
 
-// returns the LSN from where we should restart reads from the slot,
-// InvalidLSN if no state file exists and error otherwise.
-func (b *LogicalBackup) readRestartLSN() (dbutils.LSN, error) {
-	var stateInfo StateInfo
-	stateFilename := path.Join(b.baseDir(), stateFile)
-
-	if _, err := os.Stat(stateFilename); os.IsNotExist(err) {
-		return dbutils.InvalidLSN, nil
-	}
-
-	fp, err := os.OpenFile(stateFilename, os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		return dbutils.InvalidLSN, fmt.Errorf("could not create current lsn file: %v", err)
-	}
-	defer fp.Close()
-
-	if err := yaml.NewDecoder(fp).Decode(&stateInfo); err != nil {
-		return dbutils.InvalidLSN, fmt.Errorf("could not decode state info yaml: %v", err)
-	}
-
-	currentLSN, err := pgx.ParseLSN(stateInfo.CurrentLSN)
-	if err != nil {
-		return dbutils.InvalidLSN, fmt.Errorf("could not parse %q LSN string: %v", stateInfo.CurrentLSN, err)
-	}
-
-	return dbutils.LSN(currentLSN), nil
-}
-
-func (b *LogicalBackup) writeRestartLSN() error {
-	stateInfo := StateInfo{
-		Timestamp:  time.Now(),
-		CurrentLSN: b.latestFlushLSN.String(),
-	}
-
-	if b.cfg.StagingDir != "" {
-		fp, err := os.OpenFile(path.Join(b.cfg.StagingDir, stateFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-		if err != nil {
-			return fmt.Errorf("could not create current lsn file: %v", err)
-		}
-		defer fp.Close()
-
-		if err := yaml.NewEncoder(fp).Encode(stateInfo); err != nil {
-			return fmt.Errorf("could not save current lsn: %v", err)
-		}
-
-		if err := utils.SyncFileAndDirectory(fp); err != nil {
-			log.Printf("could not sync file and dir: %v", err)
-		}
-	}
-
-	fpArchive, err := os.OpenFile(path.Join(b.cfg.ArchiveDir, stateFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("could not create archive lsn file: %v", err)
-	}
-	defer fpArchive.Close()
-
-	if err := yaml.NewEncoder(fpArchive).Encode(stateInfo); err != nil {
-		return fmt.Errorf("could not save current lsn: %v", err)
-	}
-
-	if err := utils.SyncFileAndDirectory(fpArchive); err != nil {
-		log.Printf("could not sync file and dir: %v", err)
-	}
-
-	return nil
-}
-
-func (b *LogicalBackup) BackgroundBasebackuper(i int) {
-	defer b.waitGr.Done()
-
-	for {
-		obj, err := b.basebackupQueue.Get()
-		if err == context.Canceled {
-			log.Printf("quiting background base backuper %d", i)
-			return
-		}
-
-		t := obj.(tablebackup.TableBackuper)
-		log.Printf("background base backuper %d: backing up table %s", i, t)
-		if err := t.RunBasebackup(); err != nil {
-			if err == tablebackup.ErrTableNotFound {
-				// Remove the table from the list of those to backup.
-				// Hold the mutex to protect against concurrent access in QueueBasebackupTables
-				t.Stop()
-				b.backupTables.Delete(t.OID())
-			} else if err != context.Canceled {
-				log.Printf("could not basebackup %s: %v", t, err)
-			}
-		}
-		// from now on we can schedule new basebackups on that table
-		t.ClearBasebackupPending()
-	}
-}
-
-func (b *LogicalBackup) QueueBasebackupTables() {
-	// TODO: make it a responsibility of periodicBackup on a table itself
-
-	// need to hold the mutex here to prevent concurrent deletion of entries in the map.
-	b.backupTables.Map(func(t tablebackup.TableBackuper) {
-		b.basebackupQueue.Put(t)
-		t.SetBasebackupPending()
-	})
-}
-
-func (b *LogicalBackup) Close() error {
-	b.closeOnce.Do(func() {
-		close(b.stopCh)
-	})
-
-	return nil
-}
-
-func (b *LogicalBackup) Run() error {
-	if b.cfg.InitialBasebackup {
-		log.Printf("Queueing tables for the initial backup")
-		b.QueueBasebackupTables()
-	}
-
-	b.waitGr.Add(1)
-	go b.logicalDecoding()
-
-	log.Printf("Starting %d background backupers", b.cfg.ConcurrentBasebackups)
-	for i := 0; i < b.cfg.ConcurrentBasebackups; i++ {
-		b.waitGr.Add(1)
-		go b.BackgroundBasebackuper(i)
-	}
-
-	b.waitGr.Add(1)
-	go func() {
-		defer b.waitGr.Done()
-		if err := b.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("could not start http server %v", err)
-		}
-		b.Close()
-		return
-	}()
-
-	// XXX: hack to make sure the http server is aware of the context being closed.
-	b.waitGr.Add(1)
-	go func() {
-		defer b.waitGr.Done()
-
-		<-b.ctx.Done()
-		if err := b.srv.Close(); err != nil {
-			log.Printf("could not close http server: %v", err)
-		}
-
-		log.Printf("debug http server closed")
-	}()
-
-	b.waitGr.Add(1)
-	go b.prom.Run(b.ctx, b.waitGr)
-
-	b.WaitForShutdown()
-
-	b.cancel()
-	b.Wait()
-
-	return nil
-}
-
-func (b *LogicalBackup) WaitForShutdown() {
+func (b *logicalBackup) waitForShutdown() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGINT)
 
@@ -808,32 +518,49 @@ loop:
 			default:
 				log.Printf("unhandled signal: %v", sig)
 			}
-		case <-b.stopCh:
-			log.Printf("received termination request")
+		case err := <-b.errCh:
+			log.Printf("failed: %v", err)
 			break loop
 		}
 	}
 }
 
-func (b *LogicalBackup) flushOidNameMap() error {
-	if !b.tableNameChanges.isChanged {
-		return nil
-	}
+func (b *logicalBackup) initHttpSrv(port int) {
+	mux := http.NewServeMux()
 
-	fp, err := os.OpenFile(path.Join(b.baseDir(), OidNameMapFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
-	if err != nil {
-		return err
-	}
-	defer fp.Close()
+	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
 
-	err = yaml.NewEncoder(fp).Encode(b.tableNameChanges.nameChangeHistory)
-	if err == nil {
-		b.tableNameChanges.isChanged = false
+	b.srv = http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: http.TimeoutHandler(mux, httpSrvTimeout, ""),
 	}
+}
 
-	if err := utils.SyncFileAndDirectory(fp); err != nil {
-		return fmt.Errorf("could not sync oid to name map file: %v", err)
-	}
+func (b *logicalBackup) runHttpSrv() {
+	b.waitGr.Add(1)
+	go func() {
+		defer b.waitGr.Done()
 
-	return err
+		if err := b.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("could not start http server %v", err)
+		}
+		return
+	}()
+
+	// XXX: hack to make sure the http server is aware of the context being closed.
+	b.waitGr.Add(1)
+	go func() {
+		defer b.waitGr.Done()
+
+		<-b.ctx.Done()
+		if err := b.srv.Close(); err != nil {
+			log.Printf("could not close http server: %v", err)
+		}
+
+		log.Printf("debug http server shut down")
+	}()
 }

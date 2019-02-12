@@ -1,21 +1,21 @@
-package logicalrestore
+package deltafiles
 
 import (
 	"strconv"
 	"strings"
 )
 
-type segments []string
+type DeltaFiles []string
 
-func (d segments) Len() int {
+func (d DeltaFiles) Len() int {
 	return len(d)
 }
 
-func (d segments) Swap(i, j int) {
+func (d DeltaFiles) Swap(i, j int) {
 	d[i], d[j] = d[j], d[i]
 }
 
-func (d segments) Less(i, j int) bool {
+func (d DeltaFiles) Less(i, j int) bool {
 	var parts1, parts2 []string
 
 	if strings.Contains(d[i], ".") {

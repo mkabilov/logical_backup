@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.com/ikitiki/logical_backup.svg?branch=master)](https://travis-ci.com/ikitiki/logical_backup)
+[![Build Status](https://travis-ci.com/mkabilov/logical_backup.svg?branch=master)](https://travis-ci.com/mkabilov/logical_backup)
 # PostgreSQL logical backup tool
 
 ## Introduction

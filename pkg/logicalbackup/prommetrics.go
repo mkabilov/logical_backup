@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/message"
-	prom "github.com/ikitiki/logical_backup/pkg/prometheus"
-	"github.com/ikitiki/logical_backup/pkg/tablebackup"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	prom "github.com/mkabilov/logical_backup/pkg/prometheus"
+	"github.com/mkabilov/logical_backup/pkg/tablebackup"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 func (b *logicalBackup) registerMetrics() error {

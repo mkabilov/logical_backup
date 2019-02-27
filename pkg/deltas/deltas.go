@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/decoder"
+	"github.com/mkabilov/logical_backup/pkg/decoder"
 
 	"github.com/pkg/errors"
 
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/utils"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/utils"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 //DirName represents directory name for the deltas

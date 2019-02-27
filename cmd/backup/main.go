@@ -7,8 +7,8 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
+	"github.com/mkabilov/logical_backup/pkg/config"
+	"github.com/mkabilov/logical_backup/pkg/logicalbackup"
 )
 
 var (

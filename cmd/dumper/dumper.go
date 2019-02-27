@@ -11,10 +11,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/consumer"
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/config"
+	"github.com/mkabilov/logical_backup/pkg/consumer"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 const (

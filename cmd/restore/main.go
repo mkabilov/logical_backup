@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx"
 
-	"github.com/ikitiki/logical_backup/pkg/logicalrestore"
-	"github.com/ikitiki/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/logicalrestore"
+	"github.com/mkabilov/logical_backup/pkg/message"
 )
 
 var (

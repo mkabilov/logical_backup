@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 type decoder struct {

@@ -13,14 +13,14 @@ import (
 	"github.com/jackc/pgx"
 	"gopkg.in/yaml.v2"
 
-	"github.com/ikitiki/logical_backup/pkg/basebackup/bbtable"
-	"github.com/ikitiki/logical_backup/pkg/deltas"
-	"github.com/ikitiki/logical_backup/pkg/logicalbackup"
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/utils"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/utils/deltafiles"
-	"github.com/ikitiki/logical_backup/pkg/utils/namehistory"
+	"github.com/mkabilov/logical_backup/pkg/basebackup/bbtable"
+	"github.com/mkabilov/logical_backup/pkg/deltas"
+	"github.com/mkabilov/logical_backup/pkg/logicalbackup"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/utils"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/utils/deltafiles"
+	"github.com/mkabilov/logical_backup/pkg/utils/namehistory"
 )
 
 type logicalRestore struct {

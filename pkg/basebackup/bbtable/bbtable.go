@@ -13,9 +13,9 @@ import (
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/tablebackup"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/tablebackup"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 const (

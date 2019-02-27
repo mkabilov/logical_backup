@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/ikitiki/logical_backup/pkg/deltas"
+	"github.com/mkabilov/logical_backup/pkg/deltas"
 )
 
 const columnWidth = 10

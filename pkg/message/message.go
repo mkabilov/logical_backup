@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx"
 
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 type (

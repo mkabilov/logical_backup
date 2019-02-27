@@ -13,13 +13,13 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"github.com/ikitiki/logical_backup/pkg/archiver"
-	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/deltas"
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/prometheus"
-	"github.com/ikitiki/logical_backup/pkg/utils"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/archiver"
+	"github.com/mkabilov/logical_backup/pkg/config"
+	"github.com/mkabilov/logical_backup/pkg/deltas"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/prometheus"
+	"github.com/mkabilov/logical_backup/pkg/utils"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 const (

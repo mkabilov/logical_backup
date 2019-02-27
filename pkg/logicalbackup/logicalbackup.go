@@ -15,16 +15,16 @@ import (
 
 	"github.com/jackc/pgx"
 
-	"github.com/ikitiki/logical_backup/pkg/basebackup"
-	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/consumer"
-	"github.com/ikitiki/logical_backup/pkg/message"
-	prom "github.com/ikitiki/logical_backup/pkg/prometheus"
-	"github.com/ikitiki/logical_backup/pkg/tablebackup"
-	"github.com/ikitiki/logical_backup/pkg/utils"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/utils/namehistory"
-	"github.com/ikitiki/logical_backup/pkg/utils/tablesmap"
+	"github.com/mkabilov/logical_backup/pkg/basebackup"
+	"github.com/mkabilov/logical_backup/pkg/config"
+	"github.com/mkabilov/logical_backup/pkg/consumer"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	prom "github.com/mkabilov/logical_backup/pkg/prometheus"
+	"github.com/mkabilov/logical_backup/pkg/tablebackup"
+	"github.com/mkabilov/logical_backup/pkg/utils"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/utils/namehistory"
+	"github.com/mkabilov/logical_backup/pkg/utils/tablesmap"
 )
 
 const (

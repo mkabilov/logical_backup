@@ -3,8 +3,8 @@ package tablesmap
 import (
 	"sync"
 
-	"github.com/ikitiki/logical_backup/pkg/tablebackup"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/tablebackup"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 // TablesMapInterface represents interface for the backup tablesMap map

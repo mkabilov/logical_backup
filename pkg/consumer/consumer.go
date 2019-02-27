@@ -9,9 +9,9 @@ import (
 
 	"github.com/jackc/pgx"
 
-	"github.com/ikitiki/logical_backup/pkg/decoder"
-	"github.com/ikitiki/logical_backup/pkg/message"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/decoder"
+	"github.com/mkabilov/logical_backup/pkg/message"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
 )
 
 const (

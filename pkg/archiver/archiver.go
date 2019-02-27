@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/utils"
-	"github.com/ikitiki/logical_backup/pkg/utils/dbutils"
-	"github.com/ikitiki/logical_backup/pkg/utils/queue"
+	"github.com/mkabilov/logical_backup/pkg/utils"
+	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
+	"github.com/mkabilov/logical_backup/pkg/utils/queue"
 )
 
 const (

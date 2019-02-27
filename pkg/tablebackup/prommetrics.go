@@ -3,7 +3,7 @@ package tablebackup
 import (
 	"log"
 
-	"github.com/ikitiki/logical_backup/pkg/prometheus"
+	"github.com/mkabilov/logical_backup/pkg/prometheus"
 )
 
 func (t *tableBackup) updateMetricsAfterBaseBackup() {

@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ikitiki/logical_backup/pkg/basebackup/bbtable"
-	"github.com/ikitiki/logical_backup/pkg/config"
-	"github.com/ikitiki/logical_backup/pkg/tablebackup"
-	"github.com/ikitiki/logical_backup/pkg/utils/queue"
-	"github.com/ikitiki/logical_backup/pkg/utils/tablesmap"
+	"github.com/mkabilov/logical_backup/pkg/basebackup/bbtable"
+	"github.com/mkabilov/logical_backup/pkg/config"
+	"github.com/mkabilov/logical_backup/pkg/tablebackup"
+	"github.com/mkabilov/logical_backup/pkg/utils/queue"
+	"github.com/mkabilov/logical_backup/pkg/utils/tablesmap"
 )
 
 const (

@@ -1,4 +1,5 @@
 tempDir: /tmp/staging
+messagesPerDelta: 10000
 deltasPerFile: 10000
 backupThreshold: 100
 concurrentBasebackups: 5

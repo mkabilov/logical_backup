@@ -229,7 +229,7 @@ func (m Relation) String() string {
 		}
 
 		if c.Mode != -1 {
-			mode = fmt.Sprintf("atttypmod:%v", c.Mode)
+			mode = fmt.Sprintf(" atttypmod:%v", c.Mode)
 		}
 		colStr := fmt.Sprintf("%q (type:%s)%s%s", c.Name, c.TypeOID, isKey, mode)
 		columns = append(columns, colStr)

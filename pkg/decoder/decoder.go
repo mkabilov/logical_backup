@@ -52,27 +52,18 @@ func (d *decoder) timestamp() time.Time {
 	return ts.Add(time.Duration(micro) * time.Microsecond)
 }
 
-func (d *decoder) rowInfo(char byte) bool {
-	if d.buf.Next(1)[0] == char {
-		return true
-	} else {
-		d.buf.UnreadByte()
-		return false
-	}
-}
-
-func (d *decoder) tupledata() []message.Tuple {
+func (d *decoder) tupledata() []message.TupleData {
 	size := int(d.uint16())
-	data := make([]message.Tuple, size)
+	data := make([]message.TupleData, size)
 	for i := 0; i < size; i++ {
 		switch d.buf.Next(1)[0] {
 		case 'n':
-			data[i] = message.Tuple{Kind: message.TupleNull, Value: []byte{}}
+			data[i] = message.TupleData{Kind: message.TupleNull, Value: []byte{}}
 		case 'u':
-			data[i] = message.Tuple{Kind: message.TupleToasted, Value: []byte{}}
+			data[i] = message.TupleData{Kind: message.TupleUnchanged, Value: []byte{}}
 		case 't':
 			vsize := int(d.order.Uint32(d.buf.Next(4)))
-			data[i] = message.Tuple{Kind: message.TupleText, Value: d.buf.Next(vsize)}
+			data[i] = message.TupleData{Kind: message.TupleText, Value: d.buf.Next(vsize)}
 		}
 	}
 
@@ -98,120 +89,107 @@ func (d *decoder) columns() []message.Column {
 func Parse(src []byte) (message.Message, error) {
 	msgType := src[0]
 	d := &decoder{order: binary.BigEndian, buf: bytes.NewBuffer(src[1:])}
+
+	raw := message.RawMessage{Data: make([]byte, len(src))}
+	copy(raw.Data, src)
+
+	// XXX: currently we trust that everything we get is well formatted and doesn't
+	// contain mistakes. But to be completely safe we should add some format
+	// checks.
 	switch msgType {
 	case 'B':
-		m := message.Begin{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		b := message.Begin{RawMessage: raw}
 
-		m.FinalLSN = d.lsn()
-		m.Timestamp = d.timestamp()
-		m.XID = d.int32()
+		b.FinalLSN = d.lsn()
+		b.Timestamp = d.timestamp()
+		b.XID = d.int32()
+		return b, nil
 
-		return m, nil
 	case 'C':
-		m := message.Commit{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		c := message.Commit{RawMessage: raw}
 
-		m.Flags = d.uint8()
-		m.LSN = d.lsn()
-		m.TransactionLSN = d.lsn()
-		m.Timestamp = d.timestamp()
+		c.Flags = d.uint8()
+		c.LSN = d.lsn()
+		c.TransactionLSN = d.lsn()
+		c.Timestamp = d.timestamp()
+		return c, nil
 
-		return m, nil
 	case 'O':
-		m := message.Origin{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		o := message.Origin{RawMessage: raw}
+		o.LSN = d.lsn()
+		o.Name = d.string()
+		return o, nil
 
-		m.LSN = d.lsn()
-		m.Name = d.string()
-
-		return m, nil
 	case 'R':
-		m := message.Relation{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		r := message.Relation{RawMessage: raw}
 
-		m.OID = d.oid()
-		m.Namespace = d.string()
-		m.Name = d.string()
-		m.ReplicaIdentity = message.ReplicaIdentity(d.uint8())
-		m.Columns = d.columns()
+		r.OID = d.oid()
+		r.Namespace = d.string()
+		r.Name = d.string()
+		r.ReplicaIdentity = message.ReplicaIdentity(d.uint8())
+		r.Columns = d.columns()
+		return r, nil
 
-		return m, nil
 	case 'Y':
-		m := message.Type{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		t := message.Type{RawMessage: raw}
 
-		m.OID = d.oid()
-		m.Namespace = d.string()
-		m.Name = d.string()
+		t.OID = d.oid()
+		t.Namespace = d.string()
+		t.Name = d.string()
+		return t, nil
 
-		return m, nil
 	case 'I':
-		m := message.Insert{
-			Raw: make([]byte, len(src)),
+		i := message.Insert{RawMessage: raw}
+
+		i.RelationOID = d.oid()
+		if d.uint8() == 'N' {
+			i.NewRow = d.tupledata()
 		}
-		copy(m.Raw, src)
+		return i, nil
 
-		m.RelationOID = d.oid()
-		m.IsNew = d.uint8() == 'N'
-		m.NewRow = d.tupledata()
-
-		return m, nil
 	case 'U':
-		m := message.Update{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		u := message.Update{RawMessage: raw}
 
-		m.RelationOID = d.oid()
-		m.IsKey = d.rowInfo('K')
-		m.IsOld = d.rowInfo('O')
-		if m.IsKey || m.IsOld {
-			m.OldRow = d.tupledata()
-		}
-		m.IsNew = d.uint8() == 'N'
-		m.NewRow = d.tupledata()
+		u.RelationOID = d.oid()
+		char := d.uint8()
 
-		return m, nil
+		// Did we receive a marker of old tuple?
+		if char == 'K' || char == 'O' {
+			u.Ident = d.tupledata()
+			u.IdentIsKey = (char == 'K')
+			char = d.uint8()
+		}
+
+		if char == 'N' {
+			u.NewRow = d.tupledata()
+		}
+		return u, nil
+
 	case 'D':
-		m := message.Delete{
-			Raw: make([]byte, len(src)),
-		}
-		copy(m.Raw, src)
+		m := message.Delete{RawMessage: raw}
 
 		m.RelationOID = d.oid()
-		m.IsKey = d.rowInfo('K')
-		m.IsOld = d.rowInfo('O')
-		m.OldRow = d.tupledata()
-
-		return m, nil
-	case 'T':
-		m := message.Truncate{
-			Raw: make([]byte, len(src)),
+		char := d.uint8()
+		if char == 'K' || char == 'O' {
+			m.Ident = d.tupledata()
+			m.IdentIsKey = (char == 'K')
 		}
-		copy(m.Raw, src)
+		return m, nil
+
+	case 'T':
+		t := message.Truncate{RawMessage: raw}
 
 		relationsCnt := int(d.uint32())
 		options := d.uint8()
-		m.Cascade = options&truncateCascadeBit == 1
-		m.RestartIdentity = options&truncateRestartIdentityBit == 1
+		t.Cascade = options&truncateCascadeBit == 1
+		t.RestartIdentity = options&truncateRestartIdentityBit == 1
 
-		m.RelationOIDs = make([]dbutils.OID, relationsCnt)
+		t.RelationOIDs = make([]dbutils.OID, relationsCnt)
 		for i := 0; i < relationsCnt; i++ {
-			m.RelationOIDs[i] = d.oid()
+			t.RelationOIDs[i] = d.oid()
 		}
+		return t, nil
 
-		return m, nil
 	default:
 		return nil, fmt.Errorf("unknown message type for %s (%d)", []byte{msgType}, msgType)
 	}

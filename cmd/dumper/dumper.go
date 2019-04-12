@@ -8,18 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strings"
 	"syscall"
 
 	"github.com/mkabilov/logical_backup/pkg/config"
 	"github.com/mkabilov/logical_backup/pkg/consumer"
 	"github.com/mkabilov/logical_backup/pkg/message"
 	"github.com/mkabilov/logical_backup/pkg/utils/dbutils"
-)
-
-const (
-	columnWidth    = 10
-	lsnColumnWidth = 18
 )
 
 type dumper struct {
@@ -96,12 +90,9 @@ func main() {
 
 //HandleMessage processes message
 func (d *dumper) HandleMessage(msg message.Message, lsn dbutils.LSN) error {
-	msgType := msg.MsgType()
-	lsnStr := lsn.String()
-	log.Printf("%s%s%s:%s%s\n",
-		lsnStr, strings.Repeat(" ", lsnColumnWidth-len(lsnStr)),
-		msgType, strings.Repeat(" ", columnWidth-len(msgType.String())), msg.String())
-	if msgType == message.MsgCommit {
+	log.Printf("%-18s %-10s: %s", lsn.String(), msg.MsgType(), msg.String())
+
+	if msg.MsgType() == message.MsgCommit {
 		d.consumer.AdvanceLSN(lsn)
 	}
 

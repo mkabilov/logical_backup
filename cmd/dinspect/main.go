@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"strings"
 
 	"github.com/mkabilov/logical_backup/pkg/deltas"
 )
@@ -49,8 +48,7 @@ func dumpFile(filepath string) {
 		}
 
 		msgType := msg.MsgType().String()
-		delimiter := strings.Repeat(" ", columnWidth-len(msgType))
-		fmt.Printf("%s:%s%s\n", msgType, delimiter, msg.String())
+		fmt.Printf("%-10s %s\n", msgType+":", msg.String())
 	}
 
 	if err := d.Close(); err != nil {

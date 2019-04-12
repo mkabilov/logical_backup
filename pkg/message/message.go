@@ -22,9 +22,9 @@ const (
 	ReplicaIdentityIndex                   = 'i'
 	ReplicaIdentityFull                    = 'f'
 
-	TupleNull    TupleKind = 'n' // Identifies the data as NULL value.
-	TupleToasted           = 'u' // Identifies unchanged TOASTed value (the actual value is not sent).
-	TupleText              = 't' // Identifies the data as text formatted value.
+	TupleNull      TupleKind = 'n' // Identifies the data as NULL value.
+	TupleUnchanged           = 'u' // Identifies unchanged TOASTed value (the actual value is not sent).
+	TupleText                = 't' // Identifies the data as text formatted value.
 
 	MsgInsert MType = iota
 	MsgUpdate
@@ -72,6 +72,15 @@ type Message interface {
 	RawData() []byte
 }
 
+type RawMessage struct {
+	Message
+	Data []byte
+}
+
+func (m RawMessage) RawData() []byte {
+	return m.Data
+}
+
 type NamespacedName struct {
 	Namespace string `yaml:"Namespace"`
 	Name      string `yaml:"Name"`
@@ -84,20 +93,20 @@ type Column struct {
 	Mode    int32       `yaml:"Mode"`  // OID modifier of the column (atttypmod).
 }
 
-type Tuple struct {
+type TupleData struct {
 	Kind  TupleKind
 	Value []byte
 }
 
 type Begin struct {
-	Raw       []byte
+	RawMessage
 	FinalLSN  dbutils.LSN // LSN of the record that lead to this xact to be committed
 	Timestamp time.Time   // Commit timestamp of the transaction
 	XID       int32       // Xid of the transaction.
 }
 
 type Commit struct {
-	Raw            []byte
+	RawMessage
 	Flags          uint8       // Flags; currently unused (must be 0)
 	LSN            dbutils.LSN // The LastLSN of the commit.
 	TransactionLSN dbutils.LSN // LSN pointing to the end of the commit record + 1
@@ -105,59 +114,55 @@ type Commit struct {
 }
 
 type Origin struct {
-	Raw  []byte
+	RawMessage
 	LSN  dbutils.LSN // The last LSN of the commit on the origin server.
 	Name string
 }
 
 type Relation struct {
+	RawMessage
 	NamespacedName `yaml:"NamespacedName"`
 
-	Raw             []byte          `yaml:"-"`
 	OID             dbutils.OID     `yaml:"OID"`             // OID of the relation.
 	ReplicaIdentity ReplicaIdentity `yaml:"ReplicaIdentity"` // Replica identity
 	Columns         []Column        `yaml:"Columns"`         // Columns
 }
 
 type Insert struct {
-	Raw         []byte
+	RawMessage
 	RelationOID dbutils.OID // OID of the relation corresponding to the OID in the relation message.
-	IsNew       bool        // Identifies tuple as a new tuple.
 
-	NewRow []Tuple
+	NewRow []TupleData
 }
 
 type Update struct {
-	Raw         []byte
+	RawMessage
 	RelationOID dbutils.OID // OID of the relation corresponding to the OID in the relation message.
-	IsKey       bool        // OldRow contains columns which are part of REPLICA IDENTITY index.
-	IsOld       bool        // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
-	IsNew       bool        // Identifies tuple as a new tuple.
 
-	OldRow []Tuple
-	NewRow []Tuple
+	NewRow     []TupleData
+	Ident      []TupleData // Key or old row values
+	IdentIsKey bool        // Whether Ident is key
 }
 
 type Delete struct {
-	Raw         []byte
+	RawMessage
 	RelationOID dbutils.OID // OID of the relation corresponding to the OID in the relation message.
-	IsKey       bool        // OldRow contains columns which are part of REPLICA IDENTITY index.
-	IsOld       bool        // OldRow contains old tuple in case of REPLICA IDENTITY set to FULL
 
-	OldRow []Tuple
+	Ident      []TupleData // Key or old row values
+	IdentIsKey bool        // Whether Ident is key
 }
 
 type Truncate struct {
-	Raw             []byte
+	RawMessage
 	Cascade         bool
 	RestartIdentity bool
 	RelationOIDs    []dbutils.OID
 }
 
 type Type struct {
+	RawMessage
 	NamespacedName
 
-	Raw []byte
 	OID dbutils.OID // OID of the data type
 }
 
@@ -185,28 +190,21 @@ func (Origin) MsgType() MType   { return MsgOrigin }
 func (Type) MsgType() MType     { return MsgType }
 func (Truncate) MsgType() MType { return MsgTruncate }
 
-func (m Begin) RawData() []byte    { return m.Raw }
-func (m Relation) RawData() []byte { return m.Raw }
-func (m Update) RawData() []byte   { return m.Raw }
-func (m Insert) RawData() []byte   { return m.Raw }
-func (m Delete) RawData() []byte   { return m.Raw }
-func (m Commit) RawData() []byte   { return m.Raw }
-func (m Origin) RawData() []byte   { return m.Raw }
-func (m Type) RawData() []byte     { return m.Raw }
-func (m Truncate) RawData() []byte { return m.Raw }
-
-func (t Tuple) String() string {
+func (t TupleData) String() string {
 	switch t.Kind {
 	case TupleText:
 		return dbutils.QuoteLiteral(string(t.Value))
 	case TupleNull:
 		return "null"
-	case TupleToasted:
-		return "[toasted value]"
+	case TupleUnchanged:
+		return "[unchanged value]"
+	default:
+		return "unknown"
 	}
-
-	return "unknown"
 }
+
+func (t TupleData) IsNull() bool { return t.Kind == TupleNull }
+func (t TupleData) IsText() bool { return t.Kind == TupleText }
 
 func (m Begin) String() string {
 	return fmt.Sprintf("FinalLSN:%s Timestamp:%v XID:%d",
@@ -240,37 +238,42 @@ func (m Relation) String() string {
 	return strings.Join(parts, " ")
 }
 
+// Returns `delimiter` separated list of TupleData array as a string
+func joinTupleData(values []TupleData, delimiter string) string {
+	var b strings.Builder
+	first := true
+
+	for _, v := range values {
+		if !first {
+			b.WriteString(delimiter)
+		} else {
+			first = false
+		}
+
+		b.WriteString(v.String())
+	}
+	return b.String()
+}
+
 func (m Update) String() string {
 	parts := make([]string, 0)
-	newValues := make([]string, 0)
-	oldValues := make([]string, 0)
 
 	parts = append(parts, fmt.Sprintf("relOID:%s", m.RelationOID))
 
-	if m.IsKey {
-		parts = append(parts, "key")
-	}
-	if m.IsOld {
-		parts = append(parts, "old")
-	}
-	if m.IsNew {
-		parts = append(parts, "new")
+	if m.NewRow != nil {
+		parts = append(parts, fmt.Sprintf("newValues: [%s]", joinTupleData(m.NewRow, ", ")))
 	}
 
-	for _, r := range m.NewRow {
-		newValues = append(newValues, r.String())
-	}
+	if m.Ident != nil {
+		var label string
 
-	for _, r := range m.OldRow {
-		oldValues = append(oldValues, r.String())
-	}
+		if m.IdentIsKey {
+			label = "key"
+		} else {
+			label = "oldValues"
+		}
 
-	if len(newValues) > 0 {
-		parts = append(parts, fmt.Sprintf("newValues:[%s]", strings.Join(newValues, ", ")))
-	}
-
-	if len(oldValues) > 0 {
-		parts = append(parts, fmt.Sprintf("oldValues:[%s]", strings.Join(oldValues, ", ")))
+		parts = append(parts, fmt.Sprintf("%s: [%s]", label, joinTupleData(m.Ident, ", ")))
 	}
 
 	return strings.Join(parts, " ")
@@ -278,20 +281,10 @@ func (m Update) String() string {
 
 func (m Insert) String() string {
 	parts := make([]string, 0)
-	newValues := make([]string, 0)
 
 	parts = append(parts, fmt.Sprintf("relOID:%s", m.RelationOID))
-
-	if m.IsNew {
-		parts = append(parts, "new")
-	}
-
-	for _, r := range m.NewRow {
-		newValues = append(newValues, r.String())
-	}
-
-	if len(newValues) > 0 {
-		parts = append(parts, fmt.Sprintf("values:[%s]", strings.Join(newValues, ", ")))
+	if m.NewRow != nil {
+		parts = append(parts, fmt.Sprintf("newValues: [%s]", joinTupleData(m.NewRow, ", ")))
 	}
 
 	return strings.Join(parts, " ")
@@ -299,23 +292,18 @@ func (m Insert) String() string {
 
 func (m Delete) String() string {
 	parts := make([]string, 0)
-	oldValues := make([]string, 0)
 
 	parts = append(parts, fmt.Sprintf("relOID:%s", m.RelationOID))
+	if m.Ident != nil {
+		var label string
 
-	if m.IsKey {
-		parts = append(parts, "key")
-	}
-	if m.IsOld {
-		parts = append(parts, "old")
-	}
+		if m.IdentIsKey {
+			label = "key"
+		} else {
+			label = "oldValues"
+		}
 
-	for _, r := range m.OldRow {
-		oldValues = append(oldValues, r.String())
-	}
-
-	if len(oldValues) > 0 {
-		parts = append(parts, fmt.Sprintf("oldValues:[%s]", strings.Join(oldValues, ", ")))
+		parts = append(parts, fmt.Sprintf("%s: [%s]", label, joinTupleData(m.Ident, ", ")))
 	}
 
 	return strings.Join(parts, " ")
@@ -367,10 +355,9 @@ func (ins Insert) SQL(rel Relation) string {
 	names := make([]string, 0)
 	for i, v := range rel.Columns {
 		names = append(names, pgx.Identifier{v.Name}.Sanitize())
-		if ins.NewRow[i].Kind == TupleText {
-			values = append(values, dbutils.QuoteLiteral(string(ins.NewRow[i].Value)))
-		} else if ins.NewRow[i].Kind == TupleNull {
-			values = append(values, "null")
+		val := ins.NewRow[i]
+		if val.IsText() || val.IsNull() {
+			values = append(values, ins.NewRow[i].String())
 		}
 	}
 
@@ -385,29 +372,32 @@ func (upd Update) SQL(rel Relation) string {
 	cond := make([]string, 0)
 
 	for i, v := range rel.Columns {
-		if upd.NewRow[i].Kind == TupleNull {
-			values = append(values, fmt.Sprintf("%s = null", pgx.Identifier{string(v.Name)}.Sanitize()))
-		} else if upd.NewRow[i].Kind == TupleText {
-			values = append(values, fmt.Sprintf("%s = %s",
-				pgx.Identifier{string(v.Name)}.Sanitize(),
-				dbutils.QuoteLiteral(string(upd.NewRow[i].Value))))
+		colName := pgx.Identifier{string(v.Name)}.Sanitize()
+		newVal := upd.NewRow[i]
+
+		if newVal.IsText() || newVal.IsNull() {
+			values = append(values, fmt.Sprintf("%s = %s", colName, newVal.String()))
 		}
 
-		if upd.IsKey || upd.IsOld {
-			if upd.OldRow[i].Kind == TupleText {
-				cond = append(cond, fmt.Sprintf("%s = %s",
-					pgx.Identifier{string(v.Name)}.Sanitize(),
-					dbutils.QuoteLiteral(string(upd.OldRow[i].Value))))
-			} else if upd.OldRow[i].Kind == TupleNull {
-				cond = append(cond, fmt.Sprintf("%s is null", pgx.Identifier{string(v.Name)}.Sanitize()))
+		if upd.Ident != nil {
+			keyVal := upd.Ident[i]
+
+			if keyVal.IsText() {
+				cond = append(cond, fmt.Sprintf("%s = %s", colName, keyVal.String()))
+			} else if keyVal.IsNull() && !upd.IdentIsKey {
+				// only for case of REPLICA IDENTITY FULL
+				cond = append(cond, fmt.Sprintf("%s is null", colName))
 			}
 		} else {
-			if upd.NewRow[i].Kind == TupleText && v.IsKey {
-				cond = append(cond, fmt.Sprintf("%s = %s",
-					pgx.Identifier{string(v.Name)}.Sanitize(),
-					dbutils.QuoteLiteral(string(upd.NewRow[i].Value))))
-			} else if upd.NewRow[i].Kind == TupleNull && v.IsKey {
-				cond = append(cond, fmt.Sprintf("%s is null", pgx.Identifier{string(v.Name)}.Sanitize()))
+			// If there is no old row it means that the key defined by REPLICA
+			// IDENTITY didn't change and we can use values from new row
+			// to build a conditions string
+			if v.IsKey {
+				if newVal.IsText() {
+					cond = append(cond, fmt.Sprintf("%s = %s", colName, newVal.String()))
+				} else if newVal.IsNull() {
+					cond = append(cond, fmt.Sprintf("%s is null", colName))
+				}
 			}
 		}
 	}
@@ -424,10 +414,14 @@ func (upd Update) SQL(rel Relation) string {
 func (del Delete) SQL(rel Relation) string {
 	cond := make([]string, 0)
 	for i, v := range rel.Columns {
-		if del.OldRow[i].Kind == TupleText {
-			cond = append(cond, fmt.Sprintf("%s = %s",
-				pgx.Identifier{string(v.Name)}.Sanitize(),
-				dbutils.QuoteLiteral(string(del.OldRow[i].Value))))
+		colName := pgx.Identifier{string(v.Name)}.Sanitize()
+		val := del.Ident[i]
+
+		if val.IsText() {
+			cond = append(cond, fmt.Sprintf("%s = %s", colName, val.String()))
+		} else if val.IsNull() && !del.IdentIsKey {
+			// only for case of REPLICA IDENTITY FULL
+			cond = append(cond, fmt.Sprintf("%s is null", colName))
 		}
 	}
 
@@ -528,13 +522,13 @@ func (t TupleKind) String() string {
 	switch t {
 	case TupleNull:
 		return "null"
-	case TupleToasted:
-		return "toasted"
+	case TupleUnchanged:
+		return "unchanged"
 	case TupleText:
 		return "text"
+	default:
+		return "unknown"
 	}
-
-	return "unknown"
 }
 
 func (n NamespacedName) String() string {

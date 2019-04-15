@@ -81,11 +81,7 @@ func (b *basebackup) basebackupTable(table tablebackup.TableBackuper) error {
 	log.Printf("Starting base backup of %s", table)
 	bbTable = bbtable.New(b.cfg.DB, table)
 	if err := bbTable.Basebackup(); err != nil {
-		if err == bbtable.ErrEmptyTable {
-			log.Printf("Table %s seems to be empty; skipping", table)
-			// last backup time is not updated here
-			return nil
-		} else if err == bbtable.ErrTableNotFound {
+		if err == bbtable.ErrTableNotFound {
 			log.Printf("Table %s not found, skipping basebackup and removing from the list", table)
 			b.backupTables.Delete(table.OID())
 			return nil

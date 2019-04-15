@@ -51,9 +51,6 @@ type tableBasebackup struct {
 }
 
 var (
-	// ErrEmptyTable represents empty table error
-	ErrEmptyTable = errors.New("empty table")
-
 	// ErrTableNotFound represents table not found error
 	ErrTableNotFound = errors.New("table not found")
 )
@@ -250,10 +247,8 @@ func (t *tableBasebackup) Basebackup() error {
 	if err := t.createTempReplicationSlot(fmt.Sprintf("tempslot_%d", t.conn.PID())); err != nil {
 		return fmt.Errorf("could not create temp replication slot: %v", err)
 	}
-	if hasRows, err := t.hasRows(); err != nil {
+	if _, err := t.hasRows(); err != nil {
 		return fmt.Errorf("could not check if table has rows: %v", err)
-	} else if !hasRows {
-		return ErrEmptyTable
 	}
 
 	t.CreateDate = time.Now()
